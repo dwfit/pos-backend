@@ -1,69 +1,36 @@
-# ===============================
-# Node (global)
-# ===============================
-node_modules/
-npm-debug.log*
-yarn-error.log*
-pnpm-debug.log*
-
-# ===============================
-# Environment / Secrets (GLOBAL)
-# ===============================
+# secrets
 .env
-.env.local
-.env.*.local
+.env.*
+cred.text
+*.key
+*.pem
 
-# ===============================
-# Build outputs (GLOBAL)
-# ===============================
+# node
+node_modules/
+**/node_modules/
+
+# builds
 dist/
 build/
-.out/
-coverage/
-
-# ===============================
-# Next.js / Web (if any)
-# ===============================
 .next/
-out/
-
-# ===============================
-# Expo / React Native (global)
-# ===============================
+**/.next/
 .expo/
+**/.expo/
 .expo-shared/
 web-build/
 
-# ===============================
-# Databases (GLOBAL – VERY IMPORTANT)
-# ===============================
+# runtime uploads
+uploads/
+**/uploads/
+
+# local db
 *.db
 *.sqlite
 *.sqlite3
 
-# ===============================
-# Logs
-# ===============================
-logs/
+# logs
 *.log
+logs/
 
-# ===============================
-# Cache / Temp
-# ===============================
-.cache/
-tmp/
-temp/
-
-# ===============================
-# OS / Editor
-# ===============================
-.DS_Store
-Thumbs.db
-.vscode/
-.idea/
-
-
-# Uploaded files (runtime)
-uploads/
 
 cred.text
