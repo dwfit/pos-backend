@@ -1,0 +1,27 @@
+{
+  "name": "pos-monorepo",
+  "private": true,
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:api": "npm --workspace apps/api run dev",
+    "dev:web": "npm --workspace apps/web run dev",
+    "dev": "concurrently \"npm run dev:api\" \"npm run dev:web\"",
+    "seed": "npm --workspace apps/api run seed"
+  },
+  "devDependencies": {
+    "@types/multer": "^2.0.0",
+    "concurrently": "^9.0.0"
+  },
+  "dependencies": {
+    "html2canvas": "^1.4.1",
+    "jspdf": "^3.0.4",
+    "kafkajs": "^2.2.4",
+    "multer": "^2.0.2",
+    "react-native": "^0.72.17",
+    "socket.io": "^4.8.1",
+    "socket.io-client": "^4.8.1"
+  }
+}

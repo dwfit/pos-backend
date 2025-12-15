@@ -1,0 +1,11 @@
+@tailwind base; @tailwind components; @tailwind utilities;
+body { -webkit-font-smoothing: antialiased; }
+
+.table-row:hover { background-color: rgb(248 250 252); }           /* hover row */
+.skeleton { @apply bg-slate-100 animate-pulse rounded-xl; }         /* skeleton */
+.input, .select { @apply h-10 rounded-xl border border-slate-300 bg-white px-3 text-sm outline-none focus:ring-2 focus:ring-slate-200; }
+.btn { @apply h-10 rounded-xl px-4 text-sm font-semibold shadow-sm disabled:opacity-50; }
+.btn-primary { @apply btn bg-slate-900 text-white hover:bg-slate-800; }
+.btn-ghost { @apply btn border border-slate-200 bg-white hover:bg-slate-50; }
+.tag { @apply rounded-full bg-slate-100 px-2 py-1 text-[11px]; }
+

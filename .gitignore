@@ -1,0 +1,69 @@
+# ===============================
+# Node (global)
+# ===============================
+node_modules/
+npm-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# ===============================
+# Environment / Secrets (GLOBAL)
+# ===============================
+.env
+.env.local
+.env.*.local
+
+# ===============================
+# Build outputs (GLOBAL)
+# ===============================
+dist/
+build/
+.out/
+coverage/
+
+# ===============================
+# Next.js / Web (if any)
+# ===============================
+.next/
+out/
+
+# ===============================
+# Expo / React Native (global)
+# ===============================
+.expo/
+.expo-shared/
+web-build/
+
+# ===============================
+# Databases (GLOBAL – VERY IMPORTANT)
+# ===============================
+*.db
+*.sqlite
+*.sqlite3
+
+# ===============================
+# Logs
+# ===============================
+logs/
+*.log
+
+# ===============================
+# Cache / Temp
+# ===============================
+.cache/
+tmp/
+temp/
+
+# ===============================
+# OS / Editor
+# ===============================
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+
+
+# Uploaded files (runtime)
+uploads/
+
+cred.text
