@@ -19,6 +19,7 @@ type Product = {
   productModifiers?: { modifierId: string }[];
   imageUrl?: string | null;
 };
+
 type ModifierItem = { id: string; name: string; price: number };
 type ModifierGroup = { id: string; name: string; min: number; max: number; items: ModifierItem[] };
 
@@ -38,13 +39,32 @@ type Device = {
   isActive?: boolean;
   status?: "USED" | "NOT_USED";
   type?: string;
-  branch?: { id: string; name?: string | null } | null;
+  branch?: {
+    id: string;
+    name?: string | null;
+    brandId?: string | null; 
+    brand?: { id: string; name?: string | null } | null;
+  } | null;
+};
+
+
+type Brand = { id: string; name: string; isActive?: boolean };
+type Branch = {
+  id: string;
+  name?: string | null;
+  brandId?: string | null;
+  brand?: { id: string; name?: string | null } | null;
+  isActive?: boolean;
 };
 
 /* --------------------------- Helpers ----------------------------- */
 function getToken() {
   if (typeof window === "undefined") return "";
-  return localStorage.getItem("token") || "";
+  return (
+    localStorage.getItem("token") ||
+    localStorage.getItem("pos_token") ||
+    ""
+  );
 }
 
 async function fetchJson<T>(
@@ -52,16 +72,19 @@ async function fetchJson<T>(
   init?: RequestInit,
   signal?: AbortSignal
 ): Promise<T> {
+  const token = getToken();
+
   const res = await fetch(input, {
     ...init,
     headers: {
       "Content-Type": "application/json",
-      Authorization: `Bearer ${getToken()}`,
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...(init?.headers || {}),
     },
     credentials: "include",
     signal,
   });
+
   if (!res.ok) {
     const text = await res.text().catch(() => "");
     throw new Error(`${res.status} ${res.statusText}${text ? `: ${text}` : ""}`);
@@ -69,7 +92,8 @@ async function fetchJson<T>(
   return res.json();
 }
 
-/** Try multiple paths (API_BASE and relative), accept array | {items} | {data} */
+
+/** Try multiple paths, accept array | {items} | {data} */
 async function fetchListAnyShape<T>(paths: string[], signal?: AbortSignal): Promise<T[]> {
   let lastErr: any = null;
   for (const p of paths) {
@@ -108,6 +132,15 @@ function splitInclusive(amount: number, rateDec: number) {
   return { net, vat, gross: amount };
 }
 
+/* ✅ Today helper (YYYY-MM-DD for input[type=date]) */
+function todayYYYYMMDD() {
+  const now = new Date();
+  const year = now.getFullYear();
+  const month = String(now.getMonth() + 1).padStart(2, "0");
+  const day = String(now.getDate()).padStart(2, "0");
+  return `${year}-${month}-${day}`;
+}
+
 /* ============================== UI =============================== */
 
 export default function CallCenter() {
@@ -141,18 +174,14 @@ export default function CallCenter() {
 
   // Filters
   const [branchId, setBranchId] = useState("");
-  const [date, setDate] = useState("");
 
-  // ✅ set today as default date in filter
-  useEffect(() => {
-    if (!date) {
-      const now = new Date();
-      const year = now.getFullYear();
-      const month = String(now.getMonth() + 1).padStart(2, "0");
-      const day = String(now.getDate()).padStart(2, "0");
-      setDate(`${year}-${month}-${day}`); // YYYY-MM-DD for <input type="date">
-    }
-  }, [date]);
+  // ✅ FIX: date default is set at initial render (so KPI loads correctly without clicking)
+  const [date, setDate] = useState(() => todayYYYYMMDD());
+
+  // ✅ Drawer Brand filter
+  const [brands, setBrands] = useState<Brand[]>([]);
+  const [branches, setBranches] = useState<Branch[]>([]);
+  const [brandId, setBrandId] = useState("");
 
   // ---- VAT calc per line/cart ----
   function calcLine(l: CartItem) {
@@ -181,18 +210,9 @@ export default function CallCenter() {
     (async () => {
       try {
         const [cData, pData, mData] = await Promise.all([
-          fetchListAnyShape<Category>(
-            [`${API_BASE}/api/menu/categories`, `/api/menu/categories`],
-            ac.signal
-          ),
-          fetchListAnyShape<Product>(
-            [`${API_BASE}/api/menu/products`, `/api/menu/products`],
-            ac.signal
-          ),
-          fetchListAnyShape<ModifierGroup>(
-            [`${API_BASE}/api/menu/modifiers`, `/api/menu/modifiers`],
-            ac.signal
-          ),
+          fetchListAnyShape<Category>(["/api/menu/categories"], ac.signal),
+          fetchListAnyShape<Product>(["/api/menu/products"], ac.signal),
+          fetchListAnyShape<ModifierGroup>(["/api/menu/modifiers"], ac.signal),
         ]);
 
         const activeCats = (cData || [])
@@ -215,48 +235,73 @@ export default function CallCenter() {
     return () => ac.abort();
   }, []);
 
+  /* ------------------ Load Brands + Branches ------------------ */
+  useEffect(() => {
+    const ac = new AbortController();
+    (async () => {
+      try {
+        const [bData, brData] = await Promise.all([
+          fetchListAnyShape<Brand>(["/api/brands"], ac.signal),
+          fetchListAnyShape<Branch>(["/api/branches"], ac.signal),
+        ]);
+
+        setBrands((bData || []).filter((b) => (b.isActive ?? true)));
+        setBranches((brData || []).filter((b) => (b.isActive ?? true)));
+      } catch (e) {
+        console.error("Brands/Branches load failed:", e);
+        // keep what we might already have from /devices/online fallback
+      }
+    })();
+    return () => ac.abort();
+  }, []);
+
   /* ------------------ Load devices (cashiers) ------------------ */
   useEffect(() => {
-    let ignore = false;
-
+    let cancelled = false;
+  
     (async () => {
       setDevicesLoading(true);
       setDevicesError(null);
-
-      const tries = ["/api/devices/online", `${API_BASE}/api/devices/online`];
-
-      let result: Device[] | null = null;
-      let lastErr: any = null;
-
-      for (const url of tries) {
+  
+      try {
+        // ✅ try API_BASE first, then relative
+        let json: any;
         try {
-          const res = await fetch(url, {
-            headers: { "Content-Type": "application/json" },
-            credentials: "include",
-          });
-          const text = await res.text();
-          if (!res.ok) throw new Error(`HTTP ${res.status} at ${url} – ${text.slice(0, 200)}`);
-
-          const json = JSON.parse(text);
-          result = Array.isArray(json) ? json : Array.isArray(json?.items) ? json.items : null;
-          if (!result) throw new Error(`Unexpected devices response from ${url}`);
-          break;
-        } catch (e) {
-          lastErr = e;
+          json = await fetchJson<any>(`${API_BASE}/api/devices/online`);
+        } catch {
+          json = await fetchJson<any>(`/api/devices/online`);
         }
-      }
-
-      if (!ignore) {
-        if (!result) setDevicesError(String(lastErr?.message || "Failed to load devices"));
-        else setDevices(result);
-        setDevicesLoading(false);
+  
+        if (cancelled) return;
+  
+        if (Array.isArray(json?.devices)) {
+          setDevices(json.devices);
+          if (Array.isArray(json.brands)) setBrands(json.brands);
+        } else if (Array.isArray(json)) {
+          setDevices(json);
+        } else if (Array.isArray(json?.items)) {
+          setDevices(json.items);
+        } else {
+          throw new Error("Unexpected devices response shape");
+        }
+      } catch (e: any) {
+        // ✅ ignore abort errors (dev/strict-mode)
+        if (e?.name === "AbortError" || String(e?.message || "").includes("aborted")) return;
+  
+        if (!cancelled) {
+          setDevicesError(String(e?.message || "Failed to load devices"));
+          setDevices([]);
+        }
+      } finally {
+        if (!cancelled) setDevicesLoading(false);
       }
     })();
-
+  
     return () => {
-      ignore = true;
+      cancelled = true;
     };
   }, []);
+  
 
   /* --------- Branch options derived from devices (unique) --------- */
   const branchOptions = useMemo(() => {
@@ -271,6 +316,52 @@ export default function CallCenter() {
     return Array.from(map.entries()).map(([id, name]) => ({ id, name }));
   }, [devices]);
 
+  /* --------- Map branchId -> brandId --------- */
+  const branchToBrandId = useMemo(() => {
+    const m = new Map<string, string>();
+    for (const br of branches) {
+      const bId = br.brandId || br.brand?.id || "";
+      if (br?.id && bId) m.set(br.id, bId);
+    }
+    // fallback from devices (if branches endpoint missing)
+    for (const d of devices) {
+      const brId = d.branch?.id;
+      const bId = d.branch?.brandId || d.branch?.brand?.id;
+      if (brId && bId && !m.has(brId)) m.set(brId, bId);
+    }
+    return m;
+  }, [branches, devices]);
+
+  /* --------- Brand options for drawer --------- */
+  const drawerBrandOptions = useMemo(() => {
+    // collect brands that appear via devices->branch->brand
+    const brandSet = new Set<string>();
+    for (const d of devices) {
+      const brId = d.branch?.id;
+      if (!brId) continue;
+      const bId = branchToBrandId.get(brId);
+      if (bId) brandSet.add(bId);
+    }
+
+    // Prefer real brands list
+    const fromBrands = (brands || [])
+      .filter((b) => (b.isActive ?? true))
+      .filter((b) => brandSet.size === 0 || brandSet.has(b.id))
+      .map((b) => ({ id: b.id, name: b.name }));
+
+    if (fromBrands.length) return fromBrands;
+
+    // Fallback: derive from devices -> branch.brand
+    const fallback = new Map<string, string>();
+    for (const d of devices) {
+      const bId = d.branch?.brandId || d.branch?.brand?.id;
+      if (!bId) continue;
+      const bName = d.branch?.brand?.name || `Brand ${bId.slice(-4)}`;
+      fallback.set(bId, bName);
+    }
+    return Array.from(fallback.entries()).map(([id, name]) => ({ id, name }));
+  }, [brands, devices, branchToBrandId]);
+
   /* ---------- KPI loader (uses filters) ---------- */
   const loadKPI = async () => {
     try {
@@ -280,56 +371,27 @@ export default function CallCenter() {
       if (branchId) params.set("branchId", branchId);
 
       if (date) {
-        // input[type=date] gives YYYY-MM-DD → DB also uses YYYY-MM-DD
-        // we send multiple keys so whatever backend expects will work
         params.set("date", date);
         params.set("dateFrom", date);
         params.set("dateTo", date);
       }
 
-      const tries = [
-        `/api/orders?${params.toString()}`,
-        `${API_BASE}/api/orders?${params.toString()}`,
-      ];
+      const data = await fetchJson<any>(`/api/orders?${params.toString()}`);
 
-      let rows: any[] | null = null;
-      let lastErr: any = null;
+      const rows = Array.isArray(data)
+        ? data
+        : Array.isArray(data?.items)
+        ? data.items
+        : Array.isArray(data?.data)
+        ? data.data
+        : null;
 
-      for (const url of tries) {
-        try {
-          const data = await fetchJson<any>(url);
-          console.log("[callcenter KPI] raw:", url, data);
-          const arr = Array.isArray(data)
-            ? data
-            : Array.isArray(data?.items)
-              ? data.items
-              : Array.isArray(data?.data)
-                ? data.data
-                : null;
-          if (arr) {
-            rows = arr;
-            break;
-          }
-        } catch (e) {
-          lastErr = e;
-        }
-      }
-
-      if (!rows) {
-        if (lastErr) console.error("Callcenter KPI load failed:", lastErr);
-        return;
-      }
+      if (!rows) return;
 
       const base = { Closed: 0, Pending: 0, Active: 0, Declined: 0 };
 
       for (const r of rows) {
-        const stRaw =
-          r.status ??
-          r.state ??
-          r.orderStatus ??
-          r.callcenterStatus ??
-          r.Status ??
-          "";
+        const stRaw = r.status ?? r.state ?? r.orderStatus ?? r.callcenterStatus ?? r.Status ?? "";
         const st = String(stRaw).toUpperCase();
 
         if (st === "PENDING" || st === "NEW" || st === "SUBMITTED") base.Pending += 1;
@@ -344,7 +406,7 @@ export default function CallCenter() {
     }
   };
 
-  /* ---------- Initial KPI load ---------- */
+  /* ✅ Initial KPI load */
   useEffect(() => {
     loadKPI();
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -369,7 +431,7 @@ export default function CallCenter() {
               }
               if (status === "done") {
                 next.Active = Math.max(0, next.Active - 1);
-                next.Closed += 1; // move to Closed when done
+                next.Closed += 1;
               }
               if (status === "declined") {
                 next.Pending = Math.max(0, next.Pending - 1);
@@ -380,15 +442,11 @@ export default function CallCenter() {
             });
           }
         } catch {
-          // ignore parse errors
+          // ignore
         }
       };
-      es.onerror = () => {
-        // browser will retry automatically
-      };
-    } catch {
-      // ignore
-    }
+      es.onerror = () => {};
+    } catch {}
     return () => {
       es?.close?.();
     };
@@ -423,11 +481,7 @@ export default function CallCenter() {
   ) {
     const aSize = line.size?.id ?? null;
     const bSize = candidate.sizeId ?? null;
-    return (
-      line.productId === candidate.productId &&
-      aSize === bSize &&
-      sameModifiers(line.modifiers, candidate.modifiers)
-    );
+    return line.productId === candidate.productId && aSize === bSize && sameModifiers(line.modifiers, candidate.modifiers);
   }
 
   function groupsForProduct(p: Product): ModifierGroup[] {
@@ -456,9 +510,7 @@ export default function CallCenter() {
           {
             productId: p.id,
             productName: p.name,
-            size: size
-              ? { id: size.id, name: size.name, code: size.code ?? undefined, price: Number(size.price) }
-              : null,
+            size: size ? { id: size.id, name: size.name, code: size.code ?? undefined, price: Number(size.price) } : null,
             qty: 1,
             modifiers: [],
             unitPrice,
@@ -508,20 +560,14 @@ export default function CallCenter() {
 
     const sel = groups.flatMap((g) => {
       const picked = pickedMods[g.id] || new Set<string>();
-      return g.items
-        .filter((it) => picked.has(it.id))
-        .map((it) => ({ id: it.id, name: it.name, price: it.price }));
+      return g.items.filter((it) => picked.has(it.id)).map((it) => ({ id: it.id, name: it.name, price: it.price }));
     });
 
     const modTotal = sel.reduce((s, m) => s + Number(m.price || 0), 0);
     const base = size ? Number(size.price) : Number(p.basePrice || 0);
     const unitPrice = base + modTotal;
 
-    const candidate = {
-      productId: p.id,
-      sizeId: size?.id ?? null,
-      modifiers: sel,
-    };
+    const candidate = { productId: p.id, sizeId: size?.id ?? null, modifiers: sel };
 
     setCart((curr) => {
       const idx = curr.findIndex((line) => isSameLine(line, candidate));
@@ -535,9 +581,7 @@ export default function CallCenter() {
         {
           productId: p.id,
           productName: p.name,
-          size: size
-            ? { id: size.id, name: size.name, code: size.code ?? undefined, price: Number(size.price) }
-            : null,
+          size: size ? { id: size.id, name: size.name, code: size.code ?? undefined, price: Number(size.price) } : null,
           qty: 1,
           modifiers: sel,
           unitPrice,
@@ -557,6 +601,28 @@ export default function CallCenter() {
 
   const totals = useMemo(() => calcCartTotals(), [cart, products]);
 
+  /* ✅ Devices filtered by brand */
+  const cashierDevices = useMemo(() => {
+    if (!brandId) return []; // brand REQUIRED
+  
+    return devices.filter((d) => {
+      const devBrandId = d.branch?.brand?.id || d.branch?.brandId || "";
+      return (
+        d.type?.toUpperCase() === "CASHIER" &&
+        (d.receivesOnlineOrders ?? true) &&
+        (d.isActive ?? true) &&
+        d.status !== "NOT_USED" &&
+        devBrandId === brandId
+      );
+    });
+  }, [devices, brandId]);
+  
+  useEffect(() => {
+    if (!deviceId) return;
+    const stillValid = cashierDevices.some((d) => d.id === deviceId);
+    if (!stillValid) setDeviceId("");
+  }, [brandId, cashierDevices, deviceId]);
+
   async function sendToDevice() {
     if (!deviceId) return alert("Select a device.");
     if (cart.length === 0) return alert("Add at least one item.");
@@ -566,16 +632,12 @@ export default function CallCenter() {
       return alert("Please choose a CASHIER device that can receive online orders.");
     }
 
-    console.log("Sending callcenter order to device", {
-      deviceId,
-      branchId: picked.branch?.id,
-    });
-
     setSending(true);
     try {
       const payload = {
         deviceId,
         branchId: picked.branch?.id,
+        brandId,
         customerName: customerName || undefined,
         customerMobile: customerMobile || undefined,
         notes: notes || undefined,
@@ -588,12 +650,11 @@ export default function CallCenter() {
         channel: "CALLCENTER",
       };
 
-      await fetchJson(`${API_BASE}/api/callcenter/orders`, {
+      await fetchJson("/api/callcenter/orders", {
         method: "POST",
         body: JSON.stringify(payload),
       });
 
-      // New order starts as Pending
       setCounts((c) => ({ ...c, Pending: c.Pending + 1 }));
       setOpen(false);
       setCart([]);
@@ -601,26 +662,13 @@ export default function CallCenter() {
       setCustomerMobile("");
       setNotes("");
       setDeviceId("");
+      setBrandId("");
     } catch (e: any) {
       alert(e?.message || "Failed to send order");
     } finally {
       setSending(false);
     }
   }
-
-  /* ============================== JSX =============================== */
-
-  const cashierDevices = useMemo(
-    () =>
-      (devices || []).filter(
-        (d) =>
-          d.type?.toUpperCase?.() === "CASHIER" &&
-          (d.receivesOnlineOrders ?? true) &&
-          (d.isActive ?? true) &&
-          (d.status ? d.status !== "NOT_USED" : true)
-      ),
-    [devices]
-  );
 
   return (
     <div className="space-y-4">
@@ -631,11 +679,7 @@ export default function CallCenter() {
         {/* Branch filter */}
         <div className="grid gap-1 text-sm">
           <label className="text-slate-600">Branch</label>
-          <select
-            value={branchId}
-            onChange={(e) => setBranchId(e.target.value)}
-            className="border rounded-xl px-3 py-2 text-sm w-44"
-          >
+          <select value={branchId} onChange={(e) => setBranchId(e.target.value)} className="border rounded-xl px-3 py-2 text-sm w-44">
             <option value="">All Branches</option>
             {branchOptions.map((b) => (
               <option key={b.id} value={b.id}>
@@ -648,27 +692,14 @@ export default function CallCenter() {
         {/* Date filter */}
         <div className="grid gap-1 text-sm">
           <label className="text-slate-600">Date</label>
-          <input
-            type="date"
-            value={date}
-            onChange={(e) => setDate(e.target.value)}
-            className="border rounded-xl px-3 py-2 text-sm"
-          />
+          <input type="date" value={date} onChange={(e) => setDate(e.target.value)} className="border rounded-xl px-3 py-2 text-sm" />
         </div>
 
-        <button
-          onClick={loadKPI}
-          className="px-4 py-2 bg-black text-white rounded-xl text-sm"
-        >
+        <button onClick={loadKPI} className="px-4 py-2 bg-black text-white rounded-xl text-sm">
           Apply Filters
         </button>
 
-        <button
-          className="ml-auto rounded-xl bg-black text-white px-4 py-2 inline-flex items-center gap-2"
-          onClick={() => {
-            setOpen(true);
-          }}
-        >
+        <button className="ml-auto rounded-xl bg-black text-white px-4 py-2 inline-flex items-center gap-2" onClick={() => setOpen(true)}>
           <ShoppingCart className="w-4 h-4" />
           New Call Center Order
         </button>
@@ -680,13 +711,7 @@ export default function CallCenter() {
           <div key={s} className="rounded-2xl bg-white p-4 shadow-sm border">
             <div className="text-sm text-slate-500">{s}</div>
             <div className="text-2xl font-semibold">
-              {s === "Closed"
-                ? counts.Closed
-                : s === "Pending"
-                  ? counts.Pending
-                  : s === "Active"
-                    ? counts.Active
-                    : counts.Declined}
+              {s === "Closed" ? counts.Closed : s === "Pending" ? counts.Pending : s === "Active" ? counts.Active : counts.Declined}
             </div>
           </div>
         ))}
@@ -695,43 +720,30 @@ export default function CallCenter() {
       {/* Drawer */}
       {open && (
         <div className="fixed inset-0 z-50">
-          <div
-            className="absolute inset-0 bg-black/40"
-            onClick={() => {
-              setOpen(false);
-            }}
-          />
+          <div className="absolute inset-0 bg-black/40" onClick={() => setOpen(false)} />
           <div className="absolute right-0 top-0 w-full h-[100dvh] bg-white shadow-2xl overflow-y-auto overscroll-contain">
             {/* Header */}
             <div className="sticky top-0 z-10 flex items-center justify-between border-b p-4 bg-white/90">
               <div className="flex items-center gap-2">
                 <ShoppingCart className="w-5 h-5" />
                 <h3 className="font-semibold">New POS Order</h3>
-                <span className="text-xs inline-flex items-center rounded-full border px-2 py-0.5 text-slate-600 bg-white">
-                  draft
-                </span>
+                <span className="text-xs inline-flex items-center rounded-full border px-2 py-0.5 text-slate-600 bg-white">draft</span>
               </div>
-              <button
-                onClick={() => {
-                  setOpen(false);
-                }}
-                className="p-2 rounded-xl hover:bg-slate-100"
-              >
+              <button onClick={() => setOpen(false)} className="p-2 rounded-xl hover:bg-slate-100">
                 <X className="w-5 h-5" />
               </button>
             </div>
 
             {/* Body */}
             <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 p-4 flex-1 min-h-0 overflow-auto">
-              {/* LEFT: Categories + products */}
+              {/* LEFT */}
               <section className="lg:col-span-2">
                 <div className="flex flex-wrap gap-2 mb-3">
                   {cats.map((c) => (
                     <button
                       key={c.id}
                       onClick={() => setActiveCat(c.id)}
-                      className={`px-3 py-1.5 rounded-full border text-sm ${activeCat === c.id ? "bg-black text-white border-black" : "hover:bg-slate-50"
-                        }`}
+                      className={`px-3 py-1.5 rounded-full border text-sm ${activeCat === c.id ? "bg-black text-white border-black" : "hover:bg-slate-50"}`}
                     >
                       {c.name}
                     </button>
@@ -750,8 +762,7 @@ export default function CallCenter() {
                             className="h-full w-full object-cover"
                             loading="lazy"
                             onError={(e) => {
-                              (e.currentTarget as HTMLImageElement).src =
-                                "/images/placeholder-product.png";
+                              (e.currentTarget as HTMLImageElement).src = "/images/placeholder-product.png";
                             }}
                           />
                         </div>
@@ -761,9 +772,7 @@ export default function CallCenter() {
                           <select
                             className="mt-2 w-full border rounded-xl px-2 py-2 text-sm"
                             value={s?.id ?? ""}
-                            onChange={(e) =>
-                              setSizePick((prev) => ({ ...prev, [p.id]: e.target.value }))
-                            }
+                            onChange={(e) => setSizePick((prev) => ({ ...prev, [p.id]: e.target.value }))}
                           >
                             {p.sizes.map((sz) => (
                               <option key={sz.id} value={sz.id}>
@@ -772,40 +781,31 @@ export default function CallCenter() {
                             ))}
                           </select>
                         ) : (
-                          <div className="text-sm text-slate-600 mt-2">
-                            SAR {Number(p.basePrice).toFixed(2)}
-                          </div>
+                          <div className="text-sm text-slate-600 mt-2">SAR {Number(p.basePrice).toFixed(2)}</div>
                         )}
 
-                        <button
-                          onClick={() => openModifiersFor(p)}
-                          className="mt-3 w-full rounded-xl border px-3 py-2 text-sm hover:bg-slate-50"
-                        >
+                        <button onClick={() => openModifiersFor(p)} className="mt-3 w-full rounded-xl border px-3 py-2 text-sm hover:bg-slate-50">
                           Add
                         </button>
                       </div>
                     );
                   })}
-                  {visibleProducts.length === 0 && (
-                    <div className="col-span-full text-sm text-slate-500">
-                      No products in this category.
-                    </div>
-                  )}
+
+                  {visibleProducts.length === 0 && <div className="col-span-full text-sm text-slate-500">No products in this category.</div>}
                 </div>
               </section>
 
-              {/* RIGHT: Cart + details */}
+              {/* RIGHT */}
               <aside className="lg:col-span-1 space-y-4">
                 <div className="border rounded-2xl p-4">
                   <h5 className="font-medium mb-3">Cart</h5>
                   <div className="space-y-3 max-h-64 overflow-auto pr-1">
-                    {cart.length === 0 && (
-                      <div className="text-sm text-slate-500">No items yet.</div>
-                    )}
+                    {cart.length === 0 && <div className="text-sm text-slate-500">No items yet.</div>}
                     {cart.map((i, idx) => {
                       const product = products.find((p) => p.id === i.productId);
                       const rate = product?.taxRate ?? 0;
                       const { total } = calcLine(i);
+
                       return (
                         <div key={idx} className="grid gap-1">
                           <div className="flex items-center justify-between">
@@ -816,19 +816,12 @@ export default function CallCenter() {
                                 VAT {percentStr(rate)}%
                               </span>
                             </div>
-                            <button
-                              className="text-slate-400 hover:text-rose-600"
-                              onClick={() => removeCartItem(idx)}
-                            >
+                            <button className="text-slate-400 hover:text-rose-600" onClick={() => removeCartItem(idx)}>
                               ×
                             </button>
                           </div>
 
-                          {!!i.modifiers.length && (
-                            <div className="text-xs text-slate-600">
-                              {i.modifiers.map((m) => m.name).join(", ")}
-                            </div>
-                          )}
+                          {!!i.modifiers.length && <div className="text-xs text-slate-600">{i.modifiers.map((m) => m.name).join(", ")}</div>}
 
                           <div className="flex items-center justify-between">
                             <div className="flex items-center gap-2">
@@ -836,7 +829,6 @@ export default function CallCenter() {
                                 type="button"
                                 className="h-7 w-7 inline-flex items-center justify-center rounded-lg border text-sm hover:bg-slate-50"
                                 onClick={() => setQty(idx, Math.max(1, i.qty - 1))}
-                                aria-label="Decrease quantity"
                               >
                                 –
                               </button>
@@ -851,7 +843,6 @@ export default function CallCenter() {
                                 type="button"
                                 className="h-7 w-7 inline-flex items-center justify-center rounded-lg border text-sm hover:bg-slate-50"
                                 onClick={() => setQty(idx, i.qty + 1)}
-                                aria-label="Increase quantity"
                               >
                                 +
                               </button>
@@ -883,11 +874,7 @@ export default function CallCenter() {
                   <h5 className="font-medium">Customer</h5>
                   <label className="grid gap-1 text-sm">
                     <span className="text-slate-600">Name</span>
-                    <input
-                      value={customerName}
-                      onChange={(e) => setCustomerName(e.target.value)}
-                      className="border rounded-xl px-3 py-2 text-sm"
-                    />
+                    <input value={customerName} onChange={(e) => setCustomerName(e.target.value)} className="border rounded-xl px-3 py-2 text-sm" />
                   </label>
                   <label className="grid gap-1 text-sm">
                     <span className="text-slate-600">Mobile</span>
@@ -900,11 +887,46 @@ export default function CallCenter() {
                   </label>
                 </div>
 
+                {/* ✅ Brand (REQUIRED) */}
+                <div className="border rounded-2xl p-4 grid gap-3">
+                  <h5 className="font-medium">Brand</h5>
+
+                  <label className="grid gap-1 text-sm">
+                    <span className="text-slate-600">
+                      Brand Name <span className="text-rose-600">*</span>
+                    </span>
+
+                    <select
+                      value={brandId}
+                      onChange={(e) => setBrandId(e.target.value)}
+                      className="border rounded-xl px-3 py-2 text-sm"
+                    >
+                      <option value="" disabled>
+                        Select brand…
+                      </option>
+
+                      {drawerBrandOptions.map((b) => (
+                        <option key={b.id} value={b.id}>
+                          {b.name}
+                        </option>
+                      ))}
+                    </select>
+                  </label>
+                </div>
+
                 <div className="border rounded-2xl p-4 grid gap-3">
                   <h5 className="font-medium">Send To</h5>
+
                   <label className="grid gap-1 text-sm">
-                    <span className="text-slate-600">Device</span>
-                    {devicesLoading ? (
+                    <span className="text-slate-600">
+                      Device <span className="text-rose-600">*</span>
+                    </span>
+
+                    {!brandId ? (
+                      <div className="text-xs text-slate-500 px-2 py-2 border rounded-xl bg-slate-50">
+                        Please select a brand first
+                      </div>
+                    ) : devicesLoading ? (
                       <div className="text-xs text-slate-500 px-1 py-2">Loading devices…</div>
                     ) : devicesError ? (
                       <div className="text-xs text-rose-600 px-1 py-2">{devicesError}</div>
@@ -914,10 +936,13 @@ export default function CallCenter() {
                         onChange={(e) => setDeviceId(e.target.value)}
                         className="border rounded-xl px-3 py-2 text-sm"
                       >
-                        <option value="">Select cashier…</option>
+                        <option value="" disabled>
+                          Select cashier…
+                        </option>
+
                         {cashierDevices.length === 0 ? (
                           <option value="" disabled>
-                            No Activated cahier devices found
+                            No cashier devices for this brand
                           </option>
                         ) : (
                           cashierDevices.map((d) => (
@@ -930,20 +955,16 @@ export default function CallCenter() {
                       </select>
                     )}
                   </label>
+
                   <label className="grid gap-1 text-sm">
                     <span className="text-slate-600">Notes</span>
-                    <textarea
-                      value={notes}
-                      onChange={(e) => setNotes(e.target.value)}
-                      rows={2}
-                      className="border rounded-xl px-3 py-2 text-sm"
-                    />
+                    <textarea value={notes} onChange={(e) => setNotes(e.target.value)} rows={2} className="border rounded-xl px-3 py-2 text-sm" />
                   </label>
                 </div>
 
                 <button
                   onClick={sendToDevice}
-                  disabled={sending}
+                  disabled={sending || !brandId || !deviceId}
                   className="w-full rounded-xl bg-black text-white px-4 py-2 inline-flex items-center justify-center gap-2 disabled:opacity-50"
                 >
                   <Send className="w-4 h-4" />
@@ -958,20 +979,14 @@ export default function CallCenter() {
       {/* Modifiers dialog */}
       {modPicker?.open && modPicker.product && (
         <div className="fixed inset-0 z-[60]">
-          <div
-            className="absolute inset-0 bg-black/40"
-            onClick={() => setModPicker(null)}
-          />
+          <div className="absolute inset-0 bg-black/40" onClick={() => setModPicker(null)} />
           <div className="absolute right-0 top-0 h-full w-full max-w-xl bg-white shadow-2xl">
             <div className="flex items-center justify-between border-b p-4 bg-white/90">
               <div>
                 <div className="font-semibold">Choose Modifiers</div>
                 <div className="text-xs text-slate-600">{modPicker.product.name}</div>
               </div>
-              <button
-                className="p-2 rounded-xl hover:bg-slate-100"
-                onClick={() => setModPicker(null)}
-              >
+              <button className="p-2 rounded-xl hover:bg-slate-100" onClick={() => setModPicker(null)}>
                 <X className="w-5 h-5" />
               </button>
             </div>
@@ -979,13 +994,8 @@ export default function CallCenter() {
             <div className="p-4 space-y-4 overflow-auto h-[calc(100%-60px)]">
               {(() => {
                 const groups = groupsForProduct(modPicker.product);
-                if (!groups.length) {
-                  return (
-                    <div className="text-sm text-slate-600">
-                      No modifiers for this product.
-                    </div>
-                  );
-                }
+                if (!groups.length) return <div className="text-sm text-slate-600">No modifiers for this product.</div>;
+
                 return groups.map((g) => {
                   const picked = pickedMods[g.id] || new Set<string>();
                   return (
@@ -999,15 +1009,9 @@ export default function CallCenter() {
                           const checked = picked.has(it.id);
                           return (
                             <label key={it.id} className="flex items-center gap-2 text-sm">
-                              <input
-                                type="checkbox"
-                                checked={checked}
-                                onChange={() => toggleItem(g.id, it.id, g.max)}
-                              />
+                              <input type="checkbox" checked={checked} onChange={() => toggleItem(g.id, it.id, g.max)} />
                               <span className="flex-1">{it.name}</span>
-                              <span className="text-slate-600">
-                                SAR {Number(it.price).toFixed(2)}
-                              </span>
+                              <span className="text-slate-600">SAR {Number(it.price).toFixed(2)}</span>
                             </label>
                           );
                         })}
@@ -1018,10 +1022,7 @@ export default function CallCenter() {
               })()}
 
               <div className="flex justify-end">
-                <button
-                  className="rounded-xl bg-black text-white px-4 py-2"
-                  onClick={addToCartWithMods}
-                >
+                <button className="rounded-xl bg-black text-white px-4 py-2" onClick={addToCartWithMods}>
                   Add to cart
                 </button>
               </div>

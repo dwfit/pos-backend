@@ -1,56 +1,85 @@
 // apps/web/app/marketing/discounts/[id]/page.tsx
-'use client';
+"use client";
 
-import React, { useEffect, useMemo, useState } from 'react';
-import { useRouter } from 'next/navigation';
-import { X } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { X } from "lucide-react";
+import { authStore } from "@/lib/auth-store";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:4000';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:4000";
 
 /* ----------------------------- auth + fetch ----------------------------- */
 
 function getToken() {
-  if (typeof window === 'undefined') return '';
-  return (
-    localStorage.getItem('token') ||
-    localStorage.getItem('pos_token') ||
-    ''
-  );
+  if (typeof window === "undefined") return "";
+  try {
+    return (
+      localStorage.getItem("token") ||
+      localStorage.getItem("accessToken") ||
+      localStorage.getItem("access_token") ||
+      localStorage.getItem("pos_token") ||
+      ""
+    );
+  } catch {
+    return "";
+  }
 }
 
-async function fetchJson<T>(input: string, init?: RequestInit): Promise<T> {
+async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const token = getToken();
 
-  const res = await fetch(input, {
-    ...init,
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(init && init.headers),
-    },
-    credentials: 'include',
-  });
+  const headers = new Headers(init?.headers || {});
+  if (!headers.has("Accept")) headers.set("Accept", "application/json");
 
-  const text = await res.text().catch(() => '');
-
-  if (!res.ok) {
-    try {
-      const data = text ? JSON.parse(text) : null;
-      const msg = data?.message || text || `Request failed: ${res.status}`;
-      throw new Error(msg);
-    } catch {
-      throw new Error(text || `Request failed: ${res.status}`);
-    }
+  const hasBody =
+    init?.body !== undefined && init?.body !== null && init?.body !== "";
+  if (hasBody && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
   }
 
-  return text ? (JSON.parse(text) as T) : ({} as T);
+  if (token && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+
+  const res = await fetch(url, {
+    ...init,
+    headers,
+    credentials: "include",
+    cache: "no-store",
+  });
+
+  // ✅ central 401 handling (same as other pages)
+  if (res.status === 401) {
+    authStore.expire("Session expired. Please log in again.");
+    throw new Error("Unauthorized (401). Please login again.");
+  }
+
+  const text = await res.text().catch(() => "");
+
+  if (!res.ok) {
+    let msg = text || `Request failed: ${res.status}`;
+    try {
+      const data = text ? JSON.parse(text) : null;
+      msg = data?.message || data?.error || msg;
+    } catch {}
+    throw new Error(msg);
+  }
+
+  if (!text) return null as T;
+
+  try {
+    return JSON.parse(text) as T;
+  } catch (err) {
+    console.error("fetchJson: failed to parse JSON", err, text);
+    return null as T;
+  }
 }
 
 /* ----------------------------- types ----------------------------- */
 
-type DiscountQualification = 'PRODUCT' | 'ORDER' | 'ORDER_AND_PRODUCT';
-type DiscountType = 'FIXED' | 'PERCENTAGE';
-type OrderType = 'DINE_IN' | 'PICKUP' | 'DELIVERY' | 'DRIVE_THRU';
+type DiscountQualification = "PRODUCT" | "ORDER" | "ORDER_AND_PRODUCT";
+type DiscountType = "FIXED" | "PERCENTAGE";
+type OrderType = "DINE_IN" | "PICKUP" | "DELIVERY" | "DRIVE_THRU";
 
 type Discount = {
   id: string;
@@ -68,8 +97,8 @@ type Discount = {
   // optional target id arrays if backend returns them
   branchIds?: string[];
   categoryIds?: string[];
-  productIds?: string[];      // legacy / helper
-  productSizeIds?: string[];  // main source of truth for sizes
+  productIds?: string[]; // legacy / helper
+  productSizeIds?: string[]; // main source of truth for sizes
 };
 
 type Branch = {
@@ -87,9 +116,9 @@ type Category = {
 
 // In flatSizes mode this represents a "Product + Size" row (id = ProductSize.id)
 type Product = {
-  id: string;              // ProductSize.id
-  name: string;            // e.g. "Apple - Small"
-  code?: string | null;    // size code or SKU
+  id: string; // ProductSize.id
+  name: string; // e.g. "Apple - Small"
+  code?: string | null; // size code or SKU
   isActive?: boolean;
 };
 
@@ -97,50 +126,45 @@ type Product = {
 
 function qualificationLabel(q: DiscountQualification) {
   switch (q) {
-    case 'PRODUCT':
-      return 'Product';
-    case 'ORDER':
-      return 'Order';
-    case 'ORDER_AND_PRODUCT':
-      return 'Order & Product';
+    case "PRODUCT":
+      return "Product";
+    case "ORDER":
+      return "Order";
+    case "ORDER_AND_PRODUCT":
+      return "Order & Product";
     default:
       return q;
   }
 }
 
 function formatDiscountAmount(d: Discount | null) {
-  if (!d) return '—';
-  if (d.type === 'PERCENTAGE') return `${d.value}%`;
+  if (!d) return "—";
+  if (d.type === "PERCENTAGE") return `${d.value}%`;
   return d.value.toFixed(2);
 }
 
 function orderTypeLabel(o: OrderType) {
   switch (o) {
-    case 'DINE_IN':
-      return 'Dine In';
-    case 'PICKUP':
-      return 'Pick Up';
-    case 'DELIVERY':
-      return 'Delivery';
-    case 'DRIVE_THRU':
-      return 'Drive Thru';
+    case "DINE_IN":
+      return "Dine In";
+    case "PICKUP":
+      return "Pick Up";
+    case "DELIVERY":
+      return "Delivery";
+    case "DRIVE_THRU":
+      return "Drive Thru";
     default:
       return o;
   }
 }
 
-const ALL_ORDER_TYPES: OrderType[] = [
-  'DINE_IN',
-  'PICKUP',
-  'DELIVERY',
-  'DRIVE_THRU',
-];
+const ALL_ORDER_TYPES: OrderType[] = ["DINE_IN", "PICKUP", "DELIVERY", "DRIVE_THRU"];
 
 function parseOrderTypes(csv: string | null | undefined): OrderType[] {
   if (!csv) return [];
   return csv
-    .split(',')
-    .map(s => s.trim())
+    .split(",")
+    .map((s) => s.trim())
     .filter(Boolean) as OrderType[];
 }
 
@@ -161,14 +185,14 @@ export default function DiscountDetailPage({
 
   // edit modal state
   const [editOpen, setEditOpen] = useState(false);
-  const [editName, setEditName] = useState('');
-  const [editNameLocalized, setEditNameLocalized] = useState('');
+  const [editName, setEditName] = useState("");
+  const [editNameLocalized, setEditNameLocalized] = useState("");
   const [editQualification, setEditQualification] =
-    useState<DiscountQualification>('PRODUCT');
-  const [editType, setEditType] = useState<DiscountType>('PERCENTAGE');
-  const [editValue, setEditValue] = useState<string>('0');
-  const [editMaxDiscount, setEditMaxDiscount] = useState<string>('');
-  const [editMinPrice, setEditMinPrice] = useState<string>('');
+    useState<DiscountQualification>("PRODUCT");
+  const [editType, setEditType] = useState<DiscountType>("PERCENTAGE");
+  const [editValue, setEditValue] = useState<string>("0");
+  const [editMaxDiscount, setEditMaxDiscount] = useState<string>("");
+  const [editMinPrice, setEditMinPrice] = useState<string>("");
   const [editTaxable, setEditTaxable] = useState(false);
   const [editOrderTypes, setEditOrderTypes] = useState<OrderType[]>([]);
 
@@ -176,7 +200,7 @@ export default function DiscountDetailPage({
   const [branchesOpen, setBranchesOpen] = useState(false);
   const [branches, setBranches] = useState<Branch[]>([]);
   const [branchesLoading, setBranchesLoading] = useState(false);
-  const [branchSearch, setBranchSearch] = useState('');
+  const [branchSearch, setBranchSearch] = useState("");
   const [applyAllBranches, setApplyAllBranches] = useState(false);
   const [selectedBranchIds, setSelectedBranchIds] = useState<string[]>([]);
 
@@ -184,14 +208,14 @@ export default function DiscountDetailPage({
   const [categoriesOpen, setCategoriesOpen] = useState(false);
   const [categories, setCategories] = useState<Category[]>([]);
   const [categoriesLoading, setCategoriesLoading] = useState(false);
-  const [categorySearch, setCategorySearch] = useState('');
+  const [categorySearch, setCategorySearch] = useState("");
   const [selectedCategoryIds, setSelectedCategoryIds] = useState<string[]>([]);
 
   // product + size modal
   const [productsOpen, setProductsOpen] = useState(false);
   const [products, setProducts] = useState<Product[]>([]);
   const [productsLoading, setProductsLoading] = useState(false);
-  const [productSearch, setProductSearch] = useState('');
+  const [productSearch, setProductSearch] = useState("");
   // IMPORTANT: these hold ProductSize IDs (matches backend DiscountProduct.productSizeId)
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
 
@@ -202,19 +226,15 @@ export default function DiscountDetailPage({
     setLoading(true);
 
     fetchJson<Discount>(`${API_BASE}/discounts/${id}`)
-      .then(data => {
+      .then((data) => {
         if (!mounted) return;
         setDiscount(data);
 
         setApplyAllBranches(!!data.applyAllBranches);
 
         // hydrate existing targets if backend returns them
-        if (Array.isArray(data.branchIds)) {
-          setSelectedBranchIds(data.branchIds);
-        }
-        if (Array.isArray(data.categoryIds)) {
-          setSelectedCategoryIds(data.categoryIds);
-        }
+        if (Array.isArray(data.branchIds)) setSelectedBranchIds(data.branchIds);
+        if (Array.isArray(data.categoryIds)) setSelectedCategoryIds(data.categoryIds);
 
         // ✅ productSizeIds are the main source of truth
         if (Array.isArray(data.productSizeIds) && data.productSizeIds.length) {
@@ -225,24 +245,22 @@ export default function DiscountDetailPage({
         }
 
         // edit defaults
-        setEditName(data.name ?? '');
-        setEditNameLocalized(data.nameLocalized ?? '');
+        setEditName(data.name ?? "");
+        setEditNameLocalized(data.nameLocalized ?? "");
         setEditQualification(data.qualification);
         setEditType(data.type);
         setEditValue(String(data.value ?? 0));
-        setEditMaxDiscount(
-          data.maxDiscount != null ? String(data.maxDiscount) : '',
-        );
+        setEditMaxDiscount(data.maxDiscount != null ? String(data.maxDiscount) : "");
         setEditMinPrice(
-          data.minProductPrice != null ? String(data.minProductPrice) : '',
+          data.minProductPrice != null ? String(data.minProductPrice) : ""
         );
         setEditTaxable(!!data.taxable);
         setEditOrderTypes(parseOrderTypes(data.orderTypes));
       })
-      .catch(err => {
-        console.error('Load discount detail error', err);
+      .catch((err) => {
+        console.error("Load discount detail error", err);
         if (mounted) {
-          alert('Failed to load discount.');
+          alert("Failed to load discount.");
           router.back();
         }
       })
@@ -253,13 +271,13 @@ export default function DiscountDetailPage({
     };
   }, [id, router]);
 
-  const title = discount?.name || 'Discount';
+  const title = discount?.name || "Discount";
 
   /* ----------------------------- edit discount ----------------------------- */
 
   function toggleOrderType(t: OrderType) {
-    setEditOrderTypes(prev =>
-      prev.includes(t) ? prev.filter(x => x !== t) : [...prev, t],
+    setEditOrderTypes((prev) =>
+      prev.includes(t) ? prev.filter((x) => x !== t) : [...prev, t]
     );
   }
 
@@ -267,24 +285,22 @@ export default function DiscountDetailPage({
     e.preventDefault();
     if (!discount) return;
     if (!editName.trim()) {
-      alert('Name is required');
+      alert("Name is required");
       return;
     }
-    const valueNum = parseFloat(editValue || '0');
+    const valueNum = parseFloat(editValue || "0");
     if (Number.isNaN(valueNum) || valueNum < 0) {
-      alert('Discount amount must be a non-negative number');
+      alert("Discount amount must be a non-negative number");
       return;
     }
-    const maxNum =
-      editMaxDiscount.trim() === '' ? undefined : Number(editMaxDiscount);
+    const maxNum = editMaxDiscount.trim() === "" ? undefined : Number(editMaxDiscount);
     if (maxNum != null && (Number.isNaN(maxNum) || maxNum < 0)) {
-      alert('Maximum discount must be a non-negative number');
+      alert("Maximum discount must be a non-negative number");
       return;
     }
-    const minNum =
-      editMinPrice.trim() === '' ? undefined : Number(editMinPrice);
+    const minNum = editMinPrice.trim() === "" ? undefined : Number(editMinPrice);
     if (minNum != null && (Number.isNaN(minNum) || minNum < 0)) {
-      alert('Minimum product price must be a non-negative number');
+      alert("Minimum product price must be a non-negative number");
       return;
     }
 
@@ -302,19 +318,16 @@ export default function DiscountDetailPage({
         orderTypes: editOrderTypes,
       };
 
-      const updated = await fetchJson<Discount>(
-        `${API_BASE}/discounts/${discount.id}`,
-        {
-          method: 'PUT',
-          body: JSON.stringify(body),
-        },
-      );
+      const updated = await fetchJson<Discount>(`${API_BASE}/discounts/${discount.id}`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      });
 
       setDiscount(updated);
       setEditOpen(false);
     } catch (err: any) {
-      console.error('Save discount error', err);
-      alert(`Failed to save discount: ${err?.message || 'Unknown error'}`);
+      console.error("Save discount error", err);
+      alert(`Failed to save discount: ${err?.message || "Unknown error"}`);
     } finally {
       setSaving(false);
     }
@@ -322,18 +335,17 @@ export default function DiscountDetailPage({
 
   async function handleDelete() {
     if (!discount) return;
-    if (!window.confirm('Are you sure you want to delete this discount?')) {
-      return;
-    }
+    if (!window.confirm("Are you sure you want to delete this discount?")) return;
+
     setDeleting(true);
     try {
       await fetchJson(`${API_BASE}/discounts/${discount.id}`, {
-        method: 'DELETE',
+        method: "DELETE",
       });
-      router.push('/marketing/discounts');
+      router.push("/marketing/discounts");
     } catch (err: any) {
-      console.error('Delete discount error', err);
-      alert(`Failed to delete discount: ${err?.message || 'Unknown error'}`);
+      console.error("Delete discount error", err);
+      alert(`Failed to delete discount: ${err?.message || "Unknown error"}`);
     } finally {
       setDeleting(false);
     }
@@ -344,17 +356,17 @@ export default function DiscountDetailPage({
   const filteredBranches = useMemo(() => {
     const q = branchSearch.toLowerCase();
     return branches.filter(
-      b =>
+      (b) =>
         !q ||
         b.name.toLowerCase().includes(q) ||
         (b.code && b.code.toLowerCase().includes(q)) ||
-        (b.reference && b.reference.toLowerCase().includes(q)),
+        (b.reference && b.reference.toLowerCase().includes(q))
     );
   }, [branches, branchSearch]);
 
   function toggleBranch(id: string) {
-    setSelectedBranchIds(prev =>
-      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id],
+    setSelectedBranchIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
     );
   }
 
@@ -364,14 +376,13 @@ export default function DiscountDetailPage({
 
     setBranchesLoading(true);
     try {
-      // simple mode: just basic fields, ordered by name
       const data = await fetchJson<Branch[]>(
-        `${API_BASE}/branches?simple=1&pageSize=500`,
+        `${API_BASE}/branches?simple=1&pageSize=500`
       );
-      setBranches(data);
+      setBranches(data || []);
     } catch (err) {
-      console.error('Load branches error', err);
-      alert('Failed to load branches.');
+      console.error("Load branches error", err);
+      alert("Failed to load branches.");
     } finally {
       setBranchesLoading(false);
     }
@@ -387,23 +398,18 @@ export default function DiscountDetailPage({
         branchIds: applyAllBranches ? [] : selectedBranchIds,
       };
 
-      const updated = await fetchJson<Discount>(
-        `${API_BASE}/discounts/${discount.id}/targets`,
-        {
-          method: 'PUT',
-          body: JSON.stringify(body),
-        },
-      );
+      const updated = await fetchJson<Discount>(`${API_BASE}/discounts/${discount.id}/targets`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      });
 
       setDiscount(updated);
-      if (Array.isArray(updated.branchIds)) {
-        setSelectedBranchIds(updated.branchIds);
-      }
+      if (Array.isArray(updated.branchIds)) setSelectedBranchIds(updated.branchIds);
       setApplyAllBranches(!!updated.applyAllBranches);
       setBranchesOpen(false);
     } catch (err: any) {
-      console.error('Save branches error', err);
-      alert(`Failed to save branches: ${err?.message || 'Unknown error'}`);
+      console.error("Save branches error", err);
+      alert(`Failed to save branches: ${err?.message || "Unknown error"}`);
     } finally {
       setSaving(false);
     }
@@ -414,19 +420,16 @@ export default function DiscountDetailPage({
   const filteredCategories = useMemo(() => {
     const q = categorySearch.toLowerCase();
     return categories.filter(
-      c =>
-        c.isActive !== false &&
-        (!q || c.name.toLowerCase().includes(q)),
+      (c) => c.isActive !== false && (!q || c.name.toLowerCase().includes(q))
     );
   }, [categories, categorySearch]);
 
   const allCategoriesSelected =
-    categories.length > 0 &&
-    selectedCategoryIds.length === categories.length;
+    categories.length > 0 && selectedCategoryIds.length === categories.length;
 
   function toggleCategory(id: string) {
-    setSelectedCategoryIds(prev =>
-      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id],
+    setSelectedCategoryIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
     );
   }
 
@@ -437,10 +440,10 @@ export default function DiscountDetailPage({
     setCategoriesLoading(true);
     try {
       const data = await fetchJson<Category[]>(`${API_BASE}/menu/categories`);
-      setCategories(data.filter(c => c.isActive !== false));
+      setCategories((data || []).filter((c) => c.isActive !== false));
     } catch (err) {
-      console.error('Load categories error', err);
-      alert('Failed to load categories.');
+      console.error("Load categories error", err);
+      alert("Failed to load categories.");
     } finally {
       setCategoriesLoading(false);
     }
@@ -450,7 +453,7 @@ export default function DiscountDetailPage({
     if (allCategoriesSelected) {
       setSelectedCategoryIds([]);
     } else {
-      setSelectedCategoryIds(categories.map(c => c.id));
+      setSelectedCategoryIds(categories.map((c) => c.id));
     }
   }
 
@@ -463,22 +466,17 @@ export default function DiscountDetailPage({
         categoryIds: selectedCategoryIds,
       };
 
-      const updated = await fetchJson<Discount>(
-        `${API_BASE}/discounts/${discount.id}/targets`,
-        {
-          method: 'PUT',
-          body: JSON.stringify(body),
-        },
-      );
+      const updated = await fetchJson<Discount>(`${API_BASE}/discounts/${discount.id}/targets`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      });
 
       setDiscount(updated);
-      if (Array.isArray(updated.categoryIds)) {
-        setSelectedCategoryIds(updated.categoryIds);
-      }
+      if (Array.isArray(updated.categoryIds)) setSelectedCategoryIds(updated.categoryIds);
       setCategoriesOpen(false);
     } catch (err: any) {
-      console.error('Save categories error', err);
-      alert(`Failed to save categories: ${err?.message || 'Unknown error'}`);
+      console.error("Save categories error", err);
+      alert(`Failed to save categories: ${err?.message || "Unknown error"}`);
     } finally {
       setSaving(false);
     }
@@ -489,21 +487,20 @@ export default function DiscountDetailPage({
   const filteredProducts = useMemo(() => {
     const q = productSearch.toLowerCase();
     return products.filter(
-      p =>
+      (p) =>
         p.isActive !== false &&
         (!q ||
           p.name.toLowerCase().includes(q) ||
-          (p.code && p.code.toLowerCase().includes(q))),
+          (p.code && p.code.toLowerCase().includes(q)))
     );
   }, [products, productSearch]);
 
   const allProductsSelected =
-    products.length > 0 &&
-    selectedProductIds.length === products.length;
+    products.length > 0 && selectedProductIds.length === products.length;
 
   function toggleProduct(id: string) {
-    setSelectedProductIds(prev =>
-      prev.includes(id) ? prev.filter(x => x !== id) : [...prev, id],
+    setSelectedProductIds((prev) =>
+      prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]
     );
   }
 
@@ -513,14 +510,13 @@ export default function DiscountDetailPage({
 
     setProductsLoading(true);
     try {
-      // flatSizes=1 → backend returns "Product - Size" rows (id = ProductSize.id)
       const data = await fetchJson<Product[]>(
-        `${API_BASE}/menu/products?flatSizes=1&includeInactive=false`,
+        `${API_BASE}/menu/products?flatSizes=1&includeInactive=false`
       );
-      setProducts(data.filter(p => p.isActive !== false));
+      setProducts((data || []).filter((p) => p.isActive !== false));
     } catch (err) {
-      console.error('Load products error', err);
-      alert('Failed to load products.');
+      console.error("Load products error", err);
+      alert("Failed to load products.");
     } finally {
       setProductsLoading(false);
     }
@@ -530,7 +526,7 @@ export default function DiscountDetailPage({
     if (allProductsSelected) {
       setSelectedProductIds([]);
     } else {
-      setSelectedProductIds(products.map(p => p.id));
+      setSelectedProductIds(products.map((p) => p.id));
     }
   }
 
@@ -544,21 +540,15 @@ export default function DiscountDetailPage({
         productSizeIds: selectedProductIds,
       };
 
-      const updated = await fetchJson<Discount>(
-        `${API_BASE}/discounts/${discount.id}/targets`,
-        {
-          method: 'PUT',
-          body: JSON.stringify(body),
-        },
-      );
+      const updated = await fetchJson<Discount>(`${API_BASE}/discounts/${discount.id}/targets`, {
+        method: "PUT",
+        body: JSON.stringify(body),
+      });
 
       setDiscount(updated);
 
       // hydrate from updated response (prefer productSizeIds)
-      if (
-        Array.isArray(updated.productSizeIds) &&
-        updated.productSizeIds.length
-      ) {
+      if (Array.isArray(updated.productSizeIds) && updated.productSizeIds.length) {
         setSelectedProductIds(updated.productSizeIds);
       } else if (Array.isArray(updated.productIds) && updated.productIds.length) {
         setSelectedProductIds(updated.productIds);
@@ -566,8 +556,8 @@ export default function DiscountDetailPage({
 
       setProductsOpen(false);
     } catch (err: any) {
-      console.error('Save products error', err);
-      alert(`Failed to save products: ${err?.message || 'Unknown error'}`);
+      console.error("Save products error", err);
+      alert(`Failed to save products: ${err?.message || "Unknown error"}`);
     } finally {
       setSaving(false);
     }
@@ -577,32 +567,32 @@ export default function DiscountDetailPage({
 
   const branchesSummaryText = useMemo(() => {
     if (discount?.applyAllBranches) {
-      return 'Automatically applied on all existing and new branches.';
+      return "Automatically applied on all existing and new branches.";
     }
     if (selectedBranchIds.length > 0) {
       return `Applies on ${selectedBranchIds.length} selected branch${
-        selectedBranchIds.length > 1 ? 'es' : ''
+        selectedBranchIds.length > 1 ? "es" : ""
       }.`;
     }
-    return 'Select the branches where this discount can be applied.';
+    return "Select the branches where this discount can be applied.";
   }, [discount?.applyAllBranches, selectedBranchIds.length]);
 
   const categoriesSummaryText = useMemo(() => {
     if (selectedCategoryIds.length > 0) {
       return `Applies on ${selectedCategoryIds.length} selected categor${
-        selectedCategoryIds.length > 1 ? 'ies' : 'y'
+        selectedCategoryIds.length > 1 ? "ies" : "y"
       }.`;
     }
-    return 'Select the menu categories where this discount can be applied.';
+    return "Select the menu categories where this discount can be applied.";
   }, [selectedCategoryIds.length]);
 
   const productsSummaryText = useMemo(() => {
     if (selectedProductIds.length > 0) {
       return `Applies on ${selectedProductIds.length} selected product size${
-        selectedProductIds.length > 1 ? 's' : ''
+        selectedProductIds.length > 1 ? "s" : ""
       }.`;
     }
-    return 'Select the menu product sizes where this discount can be applied.';
+    return "Select the menu product sizes where this discount can be applied.";
   }, [selectedProductIds.length]);
 
   /* ----------------------------- render ----------------------------- */
@@ -628,7 +618,7 @@ export default function DiscountDetailPage({
             disabled={deleting}
             className="inline-flex h-8 items-center rounded-full border border-red-200 bg-white px-4 text-xs font-semibold text-red-600 hover:bg-red-50 disabled:opacity-60"
           >
-            {deleting ? 'Deleting…' : 'Delete Discount'}
+            {deleting ? "Deleting…" : "Delete Discount"}
           </button>
           <button
             type="button"
@@ -648,59 +638,51 @@ export default function DiscountDetailPage({
         <div className="grid grid-cols-1 gap-4 px-6 py-5 sm:grid-cols-2">
           <div className="space-y-1 text-xs">
             <div className="text-slate-500">Name</div>
-            <div className="font-medium text-slate-900">
-              {discount?.name ?? '—'}
-            </div>
+            <div className="font-medium text-slate-900">{discount?.name ?? "—"}</div>
           </div>
 
           <div className="space-y-1 text-xs">
             <div className="text-slate-500">Name Localized</div>
-            <div className="font-medium text-slate-900">
-              {discount?.nameLocalized || '—'}
-            </div>
+            <div className="font-medium text-slate-900">{discount?.nameLocalized || "—"}</div>
           </div>
 
           <div className="space-y-1 text-xs">
             <div className="text-slate-500">Qualification</div>
             <div className="font-medium text-slate-900">
-              {discount ? qualificationLabel(discount.qualification) : '—'}
+              {discount ? qualificationLabel(discount.qualification) : "—"}
             </div>
           </div>
 
           <div className="space-y-1 text-xs">
             <div className="text-slate-500">Discount Amount</div>
             <div className="font-medium text-slate-900">
-              {discount ? formatDiscountAmount(discount) : '—'}
+              {discount ? formatDiscountAmount(discount) : "—"}
             </div>
           </div>
 
           <div className="space-y-1 text-xs">
             <div className="text-slate-500">Minimum Product Price</div>
             <div className="font-medium text-slate-900">
-              {discount?.minProductPrice != null
-                ? discount.minProductPrice
-                : '—'}
+              {discount?.minProductPrice != null ? discount.minProductPrice : "—"}
             </div>
           </div>
 
           <div className="space-y-1 text-xs">
             <div className="text-slate-500">Maximum Discount</div>
             <div className="font-medium text-slate-900">
-              {discount?.maxDiscount != null ? discount.maxDiscount : '—'}
+              {discount?.maxDiscount != null ? discount.maxDiscount : "—"}
             </div>
           </div>
 
           <div className="space-y-1 text-xs">
             <div className="text-slate-500">Reference</div>
-            <div className="font-medium text-slate-900">
-              {discount?.reference || '—'}
-            </div>
+            <div className="font-medium text-slate-900">{discount?.reference || "—"}</div>
           </div>
 
           <div className="space-y-1 text-xs">
             <div className="text-slate-500">Taxable</div>
             <div className="font-medium text-slate-900">
-              {discount ? (discount.taxable ? 'Yes' : 'No') : '—'}
+              {discount ? (discount.taxable ? "Yes" : "No") : "—"}
             </div>
           </div>
 
@@ -710,7 +692,7 @@ export default function DiscountDetailPage({
               {parseOrderTypes(discount?.orderTypes).length === 0 && (
                 <span className="text-slate-400">—</span>
               )}
-              {parseOrderTypes(discount?.orderTypes).map(t => (
+              {parseOrderTypes(discount?.orderTypes).map((t) => (
                 <span
                   key={t}
                   className="inline-flex items-center rounded-full border border-slate-200 px-2 py-1 text-[10px] font-medium text-slate-700"
@@ -726,9 +708,7 @@ export default function DiscountDetailPage({
       {/* Applies on branches */}
       <section className="space-y-2">
         <div className="flex items-center justify-between">
-          <h2 className="text-xs font-semibold text-slate-800">
-            Applies On Branches
-          </h2>
+          <h2 className="text-xs font-semibold text-slate-800">Applies On Branches</h2>
           <button
             type="button"
             onClick={openBranchesModal}
@@ -746,9 +726,7 @@ export default function DiscountDetailPage({
       {/* Applies on categories */}
       <section className="space-y-2">
         <div className="flex items-center justify-between">
-          <h2 className="text-xs font-semibold text-slate-800">
-            Applies On Categories
-          </h2>
+          <h2 className="text-xs font-semibold text-slate-800">Applies On Categories</h2>
           <button
             type="button"
             onClick={openCategoriesModal}
@@ -766,9 +744,7 @@ export default function DiscountDetailPage({
       {/* Applies on product sizes */}
       <section className="space-y-2">
         <div className="flex items-center justify-between">
-          <h2 className="text-xs font-semibold text-slate-800">
-            Applies On Product Sizes
-          </h2>
+          <h2 className="text-xs font-semibold text-slate-800">Applies On Product Sizes</h2>
           <button
             type="button"
             onClick={openProductsModal}
@@ -783,18 +759,14 @@ export default function DiscountDetailPage({
         </div>
       </section>
 
-      {loading && (
-        <div className="text-[11px] text-slate-400">Loading…</div>
-      )}
+      {loading && <div className="text-[11px] text-slate-400">Loading…</div>}
 
       {/* ----------------------------- Edit Discount Modal ----------------------------- */}
       {editOpen && (
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-md rounded-2xl bg-white shadow-xl">
             <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-              <h2 className="text-sm font-semibold text-slate-900">
-                Edit Discount
-              </h2>
+              <h2 className="text-sm font-semibold text-slate-900">Edit Discount</h2>
               <button
                 type="button"
                 className="inline-flex h-7 w-7 items-center justify-center rounded-full hover:bg-slate-100"
@@ -804,10 +776,7 @@ export default function DiscountDetailPage({
               </button>
             </div>
 
-            <form
-              onSubmit={handleSaveEdit}
-              className="space-y-3 px-4 py-4 text-xs"
-            >
+            <form onSubmit={handleSaveEdit} className="space-y-3 px-4 py-4 text-xs">
               {/* Name */}
               <div className="space-y-1">
                 <label className="block font-medium text-slate-700">
@@ -816,20 +785,18 @@ export default function DiscountDetailPage({
                 <input
                   type="text"
                   value={editName}
-                  onChange={e => setEditName(e.target.value)}
+                  onChange={(e) => setEditName(e.target.value)}
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs focus:border-slate-900 focus:outline-none"
                 />
               </div>
 
               {/* Name Localized */}
               <div className="space-y-1">
-                <label className="block font-medium text-slate-700">
-                  Name Localized
-                </label>
+                <label className="block font-medium text-slate-700">Name Localized</label>
                 <input
                   type="text"
                   value={editNameLocalized}
-                  onChange={e => setEditNameLocalized(e.target.value)}
+                  onChange={(e) => setEditNameLocalized(e.target.value)}
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs focus:border-slate-900 focus:outline-none"
                 />
               </div>
@@ -841,9 +808,7 @@ export default function DiscountDetailPage({
                 </label>
                 <select
                   value={editType}
-                  onChange={e =>
-                    setEditType(e.target.value as DiscountType)
-                  }
+                  onChange={(e) => setEditType(e.target.value as DiscountType)}
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs focus:border-slate-900 focus:outline-none"
                 >
                   <option value="PERCENTAGE">Percentage</option>
@@ -854,8 +819,7 @@ export default function DiscountDetailPage({
               {/* Discount Amount */}
               <div className="space-y-1">
                 <label className="block font-medium text-slate-700">
-                  Discount Amount
-                  {editType === 'PERCENTAGE' ? ' (%)' : ''}{' '}
+                  Discount Amount{editType === "PERCENTAGE" ? " (%)" : ""}{" "}
                   <span className="text-red-500">*</span>
                 </label>
                 <input
@@ -863,52 +827,44 @@ export default function DiscountDetailPage({
                   min={0}
                   step="0.01"
                   value={editValue}
-                  onChange={e => setEditValue(e.target.value)}
+                  onChange={(e) => setEditValue(e.target.value)}
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs focus:border-slate-900 focus:outline-none"
                 />
               </div>
 
               {/* Maximum Discount */}
               <div className="space-y-1">
-                <label className="block font-medium text-slate-700">
-                  Maximum Discount
-                </label>
+                <label className="block font-medium text-slate-700">Maximum Discount</label>
                 <input
                   type="number"
                   min={0}
                   step="0.01"
                   value={editMaxDiscount}
-                  onChange={e => setEditMaxDiscount(e.target.value)}
+                  onChange={(e) => setEditMaxDiscount(e.target.value)}
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs focus:border-slate-900 focus:outline-none"
                 />
               </div>
 
               {/* Minimum Product Price */}
               <div className="space-y-1">
-                <label className="block font-medium text-slate-700">
-                  Minimum Product Price
-                </label>
+                <label className="block font-medium text-slate-700">Minimum Product Price</label>
                 <input
                   type="number"
                   min={0}
                   step="0.01"
                   value={editMinPrice}
-                  onChange={e => setEditMinPrice(e.target.value)}
+                  onChange={(e) => setEditMinPrice(e.target.value)}
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs focus:border-slate-900 focus:outline-none"
                 />
               </div>
 
               {/* Qualification */}
               <div className="space-y-1">
-                <label className="block font-medium text-slate-700">
-                  Qualification
-                </label>
+                <label className="block font-medium text-slate-700">Qualification</label>
                 <select
                   value={editQualification}
-                  onChange={e =>
-                    setEditQualification(
-                      e.target.value as DiscountQualification,
-                    )
+                  onChange={(e) =>
+                    setEditQualification(e.target.value as DiscountQualification)
                   }
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs focus:border-slate-900 focus:outline-none"
                 >
@@ -920,11 +876,9 @@ export default function DiscountDetailPage({
 
               {/* Order types */}
               <div className="space-y-1">
-                <label className="block font-medium text-slate-700">
-                  Applies On Order Types
-                </label>
+                <label className="block font-medium text-slate-700">Applies On Order Types</label>
                 <div className="flex flex-wrap gap-2">
-                  {ALL_ORDER_TYPES.map(o => {
+                  {ALL_ORDER_TYPES.map((o) => {
                     const active = editOrderTypes.includes(o);
                     return (
                       <button
@@ -933,8 +887,8 @@ export default function DiscountDetailPage({
                         onClick={() => toggleOrderType(o)}
                         className={`inline-flex items-center rounded-full border px-2 py-1 text-[11px] ${
                           active
-                            ? 'border-black bg-black text-white'
-                            : 'border-slate-300 bg-white text-slate-700 hover:bg-slate-50'
+                            ? "border-black bg-black text-white"
+                            : "border-slate-300 bg-white text-slate-700 hover:bg-slate-50"
                         }`}
                       >
                         {orderTypeLabel(o)}
@@ -950,13 +904,10 @@ export default function DiscountDetailPage({
                   id="edit-taxable"
                   type="checkbox"
                   checked={editTaxable}
-                  onChange={e => setEditTaxable(e.target.checked)}
+                  onChange={(e) => setEditTaxable(e.target.checked)}
                   className="h-3 w-3 rounded border-slate-300"
                 />
-                <label
-                  htmlFor="edit-taxable"
-                  className="text-xs text-slate-700"
-                >
+                <label htmlFor="edit-taxable" className="text-xs text-slate-700">
                   Taxable
                 </label>
               </div>
@@ -984,7 +935,7 @@ export default function DiscountDetailPage({
                     disabled={saving}
                     className="inline-flex h-8 items-center rounded-lg bg-black px-4 text-xs font-semibold text-white hover:bg-black/90 disabled:opacity-60"
                   >
-                    {saving ? 'Saving…' : 'Save'}
+                    {saving ? "Saving…" : "Save"}
                   </button>
                 </div>
               </div>
@@ -998,9 +949,7 @@ export default function DiscountDetailPage({
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-md rounded-2xl bg-white shadow-xl">
             <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-              <h2 className="text-sm font-semibold text-slate-900">
-                Applies On Branches
-              </h2>
+              <h2 className="text-sm font-semibold text-slate-900">Applies On Branches</h2>
               <button
                 type="button"
                 className="inline-flex h-7 w-7 items-center justify-center rounded-full hover:bg-slate-100"
@@ -1020,9 +969,7 @@ export default function DiscountDetailPage({
                     onChange={() => setApplyAllBranches(true)}
                     className="h-3 w-3"
                   />
-                  <span>
-                    Automatically apply on all existing and new branches
-                  </span>
+                  <span>Automatically apply on all existing and new branches</span>
                 </label>
 
                 <label className="flex items-center gap-2">
@@ -1043,7 +990,7 @@ export default function DiscountDetailPage({
                     type="text"
                     placeholder="Type something to start searching"
                     value={branchSearch}
-                    onChange={e => setBranchSearch(e.target.value)}
+                    onChange={(e) => setBranchSearch(e.target.value)}
                     className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs focus:border-slate-900 focus:outline-none"
                   />
                   <div className="max-h-56 space-y-1 overflow-y-auto rounded-lg border border-slate-200">
@@ -1053,28 +1000,22 @@ export default function DiscountDetailPage({
                       </div>
                     )}
                     {!branchesLoading &&
-                      filteredBranches.map(b => {
+                      filteredBranches.map((b) => {
                         const selected = selectedBranchIds.includes(b.id);
                         const label =
-                          (b.name || '') +
-                          (b.reference || b.code
-                            ? ` (${b.reference || b.code})`
-                            : '');
+                          (b.name || "") +
+                          (b.reference || b.code ? ` (${b.reference || b.code})` : "");
                         return (
                           <button
                             key={b.id}
                             type="button"
                             onClick={() => toggleBranch(b.id)}
                             className={`flex w-full items-center justify-between px-3 py-2 text-left text-[11px] ${
-                              selected
-                                ? 'bg-black text-white'
-                                : 'hover:bg-slate-50'
+                              selected ? "bg-black text-white" : "hover:bg-slate-50"
                             }`}
                           >
                             <span>{label}</span>
-                            {selected && (
-                              <span className="text-[10px]">Selected</span>
-                            )}
+                            {selected && <span className="text-[10px]">Selected</span>}
                           </button>
                         );
                       })}
@@ -1101,7 +1042,7 @@ export default function DiscountDetailPage({
                   disabled={saving}
                   className="inline-flex h-8 items-center rounded-lg bg-black px-4 text-xs font-semibold text-white hover:bg-black/90 disabled:opacity-60"
                 >
-                  {saving ? 'Saving…' : 'Save'}
+                  {saving ? "Saving…" : "Save"}
                 </button>
               </div>
             </div>
@@ -1114,9 +1055,7 @@ export default function DiscountDetailPage({
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-md rounded-2xl bg-white shadow-xl">
             <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-              <h2 className="text-sm font-semibold text-slate-900">
-                Edit Categories
-              </h2>
+              <h2 className="text-sm font-semibold text-slate-900">Edit Categories</h2>
               <button
                 type="button"
                 className="inline-flex h-7 w-7 items-center justify-center rounded-full hover:bg-slate-100"
@@ -1132,14 +1071,14 @@ export default function DiscountDetailPage({
                 onClick={toggleSelectAllCategories}
                 className="inline-flex h-7 items-center rounded-full border border-slate-200 bg-white px-3 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
               >
-                {allCategoriesSelected ? 'Deselect All' : 'Select All'}
+                {allCategoriesSelected ? "Deselect All" : "Select All"}
               </button>
 
               <input
                 type="text"
                 placeholder="Type something to start searching"
                 value={categorySearch}
-                onChange={e => setCategorySearch(e.target.value)}
+                onChange={(e) => setCategorySearch(e.target.value)}
                 className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs focus:border-slate-900 focus:outline-none"
               />
 
@@ -1150,7 +1089,7 @@ export default function DiscountDetailPage({
                   </div>
                 )}
                 {!categoriesLoading &&
-                  filteredCategories.map(c => {
+                  filteredCategories.map((c) => {
                     const selected = selectedCategoryIds.includes(c.id);
                     return (
                       <button
@@ -1158,13 +1097,11 @@ export default function DiscountDetailPage({
                         type="button"
                         onClick={() => toggleCategory(c.id)}
                         className={`flex w-full items-center justify-between px-3 py-2 text-left text-[11px] ${
-                          selected ? 'bg-black text-white' : 'hover:bg-slate-50'
+                          selected ? "bg-black text-white" : "hover:bg-slate-50"
                         }`}
                       >
                         <span>{c.name}</span>
-                        {selected && (
-                          <span className="text-[10px]">Selected</span>
-                        )}
+                        {selected && <span className="text-[10px]">Selected</span>}
                       </button>
                     );
                   })}
@@ -1189,7 +1126,7 @@ export default function DiscountDetailPage({
                   disabled={saving}
                   className="inline-flex h-8 items-center rounded-lg bg-black px-4 text-xs font-semibold text-white hover:bg-black/90 disabled:opacity-60"
                 >
-                  {saving ? 'Saving…' : 'Save'}
+                  {saving ? "Saving…" : "Save"}
                 </button>
               </div>
             </div>
@@ -1202,9 +1139,7 @@ export default function DiscountDetailPage({
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-md rounded-2xl bg-white shadow-xl">
             <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-              <h2 className="text-sm font-semibold text-slate-900">
-                Edit Product Sizes
-              </h2>
+              <h2 className="text-sm font-semibold text-slate-900">Edit Product Sizes</h2>
               <button
                 type="button"
                 className="inline-flex h-7 w-7 items-center justify-center rounded-full hover:bg-slate-100"
@@ -1220,14 +1155,14 @@ export default function DiscountDetailPage({
                 onClick={toggleSelectAllProducts}
                 className="inline-flex h-7 items-center rounded-full border border-slate-200 bg-white px-3 text-[11px] font-medium text-slate-700 hover:bg-slate-50"
               >
-                {allProductsSelected ? 'Deselect All' : 'Select All'}
+                {allProductsSelected ? "Deselect All" : "Select All"}
               </button>
 
               <input
                 type="text"
                 placeholder="Type something to start searching"
                 value={productSearch}
-                onChange={e => setProductSearch(e.target.value)}
+                onChange={(e) => setProductSearch(e.target.value)}
                 className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs focus:border-slate-900 focus:outline-none"
               />
 
@@ -1238,22 +1173,20 @@ export default function DiscountDetailPage({
                   </div>
                 )}
                 {!productsLoading &&
-                  filteredProducts.map(p => {
+                  filteredProducts.map((p) => {
                     const selected = selectedProductIds.includes(p.id);
-                    const label = p.name + (p.code ? ` (${p.code})` : '');
+                    const label = p.name + (p.code ? ` (${p.code})` : "");
                     return (
                       <button
                         key={p.id}
                         type="button"
                         onClick={() => toggleProduct(p.id)}
                         className={`flex w-full items-center justify-between px-3 py-2 text-left text-[11px] ${
-                          selected ? 'bg-black text-white' : 'hover:bg-slate-50'
+                          selected ? "bg-black text-white" : "hover:bg-slate-50"
                         }`}
                       >
                         <span>{label}</span>
-                        {selected && (
-                          <span className="text-[10px]">Selected</span>
-                        )}
+                        {selected && <span className="text-[10px]">Selected</span>}
                       </button>
                     );
                   })}
@@ -1278,7 +1211,7 @@ export default function DiscountDetailPage({
                   disabled={saving}
                   className="inline-flex h-8 items-center rounded-lg bg-black px-4 text-xs font-semibold text-white hover:bg-black/90 disabled:opacity-60"
                 >
-                  {saving ? 'Saving…' : 'Save'}
+                  {saving ? "Saving…" : "Save"}
                 </button>
               </div>
             </div>

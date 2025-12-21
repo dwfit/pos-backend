@@ -1,8 +1,10 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import { useParams, useRouter } from "next/navigation";
-import { json } from "../../../../lib/fetcher";
+
+// If you have authStore, use it (recommended)
+import { authStore } from "@/lib/auth-store";
 
 type OrderSummary = {
   id: string;
@@ -28,8 +30,71 @@ type OrdersResponse = {
   branches: BranchOpt[];
 };
 
+/* -------------------------------- helpers ------------------------------- */
+
+function getAccessTokenSafe(): string | null {
+  try {
+    // Try Zustand store shapes (different projects use different keys)
+    const st: any = (authStore as any)?.getState?.();
+    const fromStore =
+      st?.token ||
+      st?.accessToken ||
+      st?.access_token ||
+      st?.session?.token ||
+      st?.session?.accessToken;
+
+    if (typeof fromStore === "string" && fromStore.length > 10) return fromStore;
+
+    // Fallback to localStorage
+    const fromLs =
+      localStorage.getItem("token") ||
+      localStorage.getItem("accessToken") ||
+      localStorage.getItem("access_token");
+
+    if (fromLs && fromLs.length > 10) return fromLs;
+  } catch {
+    // ignore
+  }
+  return null;
+}
+
+async function fetchAuthed<T>(url: string): Promise<T> {
+  const token = getAccessTokenSafe();
+
+  const res = await fetch(url, {
+    method: "GET",
+    headers: {
+      "Content-Type": "application/json",
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    // important if you ever switch to cookies/httpOnly sessions
+    credentials: "include",
+  });
+
+  if (res.status === 401) {
+    // throw a special error so caller can redirect
+    const err: any = new Error("UNAUTHORIZED");
+    err.status = 401;
+    throw err;
+  }
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`HTTP ${res.status} ${res.statusText} ${text}`);
+  }
+
+  return (await res.json()) as T;
+}
+
+/* -------------------------------- page ---------------------------------- */
+
 export default function CustomerOrdersPage() {
-  const { id } = useParams();
+  const params = useParams();
+  const id = useMemo(() => {
+    const raw: any = (params as any)?.id;
+    return Array.isArray(raw) ? raw[0] : raw;
+  }, [params]);
+
   const router = useRouter();
 
   const [data, setData] = useState<OrdersResponse | null>(null);
@@ -62,10 +127,23 @@ export default function CustomerOrdersPage() {
 
       const url = `/api/customers/${id}/orders?` + params.toString();
 
-      const res = await json<OrdersResponse | null>(url, null);
-      if (!cancelled) {
-        setData(res);
-        setLoading(false);
+      try {
+        const res = await fetchAuthed<OrdersResponse>(url);
+        if (!cancelled) setData(res);
+      } catch (e: any) {
+        // If token missing/expired -> go login
+        if (e?.status === 401 || e?.message === "UNAUTHORIZED") {
+          if (!cancelled) {
+            // optional: keep returnTo for after login
+            router.replace(`/login?returnTo=${encodeURIComponent(`/customers/${id}/orders`)}`);
+          }
+          return;
+        }
+
+        console.error("Failed to load customer orders:", e);
+        if (!cancelled) setData(null);
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     }
 
@@ -74,7 +152,7 @@ export default function CustomerOrdersPage() {
     return () => {
       cancelled = true;
     };
-  }, [id, page, search, fromDate, toDate, branchId]);
+  }, [id, page, search, fromDate, toDate, branchId, router]);
 
   const fmtDate = (value?: string) =>
     value
@@ -92,11 +170,7 @@ export default function CustomerOrdersPage() {
   }
 
   if (!data) {
-    return (
-      <div className="p-6 text-red-500">
-        Unable to load customer orders.
-      </div>
-    );
+    return <div className="p-6 text-red-500">Unable to load customer orders.</div>;
   }
 
   const canPrev = page > 1;
@@ -120,9 +194,7 @@ export default function CustomerOrdersPage() {
         ← Back to Customer
       </button>
 
-      <h1 className="text-2xl font-semibold">
-        Orders of {data.name}
-      </h1>
+      <h1 className="text-2xl font-semibold">Orders of {data.name}</h1>
 
       {/* Summary */}
       <div className="rounded-xl border bg-white px-4 py-4 shadow-sm">
@@ -137,9 +209,7 @@ export default function CustomerOrdersPage() {
         <div className="flex flex-wrap gap-3 items-end">
           {/* Search by orderNo */}
           <div className="flex flex-col">
-            <label className="text-xs text-slate-500 mb-1">
-              Search (Order No)
-            </label>
+            <label className="text-xs text-slate-500 mb-1">Search (Order No)</label>
             <input
               type="text"
               value={search}
@@ -154,9 +224,7 @@ export default function CustomerOrdersPage() {
 
           {/* From date */}
           <div className="flex flex-col">
-            <label className="text-xs text-slate-500 mb-1">
-              From
-            </label>
+            <label className="text-xs text-slate-500 mb-1">From</label>
             <input
               type="date"
               value={fromDate}
@@ -170,9 +238,7 @@ export default function CustomerOrdersPage() {
 
           {/* To date */}
           <div className="flex flex-col">
-            <label className="text-xs text-slate-500 mb-1">
-              To
-            </label>
+            <label className="text-xs text-slate-500 mb-1">To</label>
             <input
               type="date"
               value={toDate}
@@ -186,9 +252,7 @@ export default function CustomerOrdersPage() {
 
           {/* Branch filter */}
           <div className="flex flex-col">
-            <label className="text-xs text-slate-500 mb-1">
-              Branch
-            </label>
+            <label className="text-xs text-slate-500 mb-1">Branch</label>
             <select
               value={branchId}
               onChange={(e) => {
@@ -220,19 +284,15 @@ export default function CustomerOrdersPage() {
       {/* Orders list */}
       <div className="rounded-xl border bg-white shadow-sm">
         <div className="flex justify-between items-center border-b px-4 py-3">
-          <h2 className="text-sm uppercase tracking-wide text-slate-500">
-            Orders List
-          </h2>
+          <h2 className="text-sm uppercase tracking-wide text-slate-500">Orders List</h2>
           <span className="text-xs text-slate-500">
-            Page {data.page} of {data.totalPages} •{" "}
-            {data.totalOrders} order{data.totalOrders !== 1 ? "s" : ""}
+            Page {data.page} of {data.totalPages} • {data.totalOrders} order
+            {data.totalOrders !== 1 ? "s" : ""}
           </span>
         </div>
 
         {loading ? (
-          <div className="p-6 text-slate-500 text-center">
-            Loading...
-          </div>
+          <div className="p-6 text-slate-500 text-center">Loading...</div>
         ) : data.orders.length === 0 ? (
           <div className="p-6 text-slate-400 text-center">
             No orders found with current filters.
@@ -246,9 +306,7 @@ export default function CustomerOrdersPage() {
                 className="p-4 cursor-pointer hover:bg-slate-50 transition"
               >
                 <div className="flex justify-between">
-                  <div className="font-medium text-slate-900">
-                    {o.orderNo}
-                  </div>
+                  <div className="font-medium text-slate-900">{o.orderNo}</div>
                   <div className="font-semibold text-slate-900">
                     {o.netTotal.toLocaleString("en-SA")} ﷼
                   </div>
@@ -266,8 +324,7 @@ export default function CustomerOrdersPage() {
         {/* Pagination */}
         <div className="flex items-center justify-between px-4 py-3 border-t">
           <div className="text-xs text-slate-500">
-            Showing {data.orders.length} of{" "}
-            {data.totalOrders.toLocaleString("en-SA")} orders
+            Showing {data.orders.length} of {data.totalOrders.toLocaleString("en-SA")} orders
           </div>
           <div className="flex gap-2">
             <button

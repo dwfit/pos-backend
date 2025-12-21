@@ -1,33 +1,37 @@
 // apps/api/src/routes/callcenter.ts
-import { Router } from 'express';
-import { prisma } from '../db';
-import { Decimal } from '@prisma/client/runtime/library';
-import { broadcastCallcenterOrder } from '../ws'; 
+import { Router } from "express";
+import { prisma } from "../db";
+import { Decimal } from "@prisma/client/runtime/library";
+import { broadcastCallcenterOrder } from "../ws";
 
 const router = Router();
 
+/* -------------------- Constants -------------------- */
+
+// Keep ONE canonical value only
+const CC_CHANNEL = "CALLCENTER" as const;
+// If you upgraded schema to enum OrderChannel, this should still work via "as any".
+
 /* -------------------- Debug helpers -------------------- */
 
-router.get('/debug', (req, res) => {
-  console.log('CALLCENTER DEBUG HIT');
-  res.json({ ok: true, scope: 'callcenter' });
+router.get("/debug", (req, res) => {
+  console.log("CALLCENTER DEBUG HIT");
+  res.json({ ok: true, scope: "callcenter" });
 });
 
-router.get('/orders/debug', async (req, res) => {
+router.get("/orders/debug", async (req, res) => {
   try {
     const rows = await prisma.order.findMany({
-      // accept both possible stored values, just in case
-      where: { channel: { in: ['CALLCENTER', 'CallCenter'] as any } },
-      orderBy: { createdAt: 'desc' },
+      // Support legacy data too
+      where: { channel: { in: ["CALLCENTER", "CallCenter"] as any } },
+      orderBy: { createdAt: "desc" },
       take: 10,
-      include: {
-        items: true,
-      },
+      include: { items: true },
     });
     res.json(rows);
   } catch (e: any) {
     console.error(e);
-    res.status(500).json({ error: 'Failed to load callcenter orders' });
+    res.status(500).json({ error: "Failed to load callcenter orders" });
   }
 });
 
@@ -37,9 +41,9 @@ const clients: Client[] = [];
 
 function publishStatus(
   orderId: string,
-  status: 'pending' | 'active' | 'done' | 'declined'
+  status: "pending" | "active" | "done" | "declined"
 ) {
-  const payload = `data: ${JSON.stringify({ type: 'status', orderId, status })}\n\n`;
+  const payload = `data: ${JSON.stringify({ type: "status", orderId, status })}\n\n`;
   for (const c of clients) c.res.write(payload);
 }
 
@@ -51,21 +55,19 @@ function todayStart() {
   return d;
 }
 
-// Simple order number: CC-YYYYMMDD-XXXX
 async function generateOrderNo() {
   const d = new Date();
   const y = d.getFullYear();
-  const m = String(d.getMonth() + 1).padStart(2, '0');
-  const day = String(d.getDate()).padStart(2, '0');
+  const m = String(d.getMonth() + 1).padStart(2, "0");
+  const day = String(d.getDate()).padStart(2, "0");
   const rand = Math.random().toString(36).slice(2, 6).toUpperCase();
   return `CC-${y}${m}${day}-${rand}`;
 }
 
-// taxRate helper – accepts 0.15 or 15
 function rateToDecimal(r?: number | null) {
   if (r == null || !isFinite(Number(r))) return 0;
   const n = Number(r);
-  return n < 1 ? n : n / 100; // 0.15 or 15 → 0.15
+  return n < 1 ? n : n / 100;
 }
 
 function splitInclusiveDecimal(amount: Decimal, rateDec: number) {
@@ -76,12 +78,56 @@ function splitInclusiveDecimal(amount: Decimal, rateDec: number) {
   return { net, vat, gross: amount };
 }
 
+async function resolveBrandIdOrThrow(args: { uiBrandId?: string; branchId: string }) {
+  const br = await prisma.branch.findUnique({
+    where: { id: args.branchId },
+    select: { id: true, brandId: true },
+  });
+
+  if (!br) {
+    return {
+      brandId: null as string | null,
+      branchBrandId: null as string | null,
+    };
+  }
+
+  const branchBrandId = br.brandId ?? null;
+  const uiBrandId = args.uiBrandId?.trim() ? args.uiBrandId.trim() : null;
+
+  if (uiBrandId) {
+    const exists = await prisma.brand.findUnique({
+      where: { id: uiBrandId },
+      select: { id: true },
+    });
+    if (!exists) throw new Error("Selected brand not found");
+  }
+
+  if (branchBrandId && uiBrandId && branchBrandId !== uiBrandId) {
+    throw new Error("Selected brand does not match branch brand");
+  }
+
+  const finalBrandId = uiBrandId || branchBrandId;
+  return { brandId: finalBrandId, branchBrandId };
+}
+
+async function resolveBranchIdFromPosDeviceOrThrow(deviceId: string) {
+  const dev = await prisma.posDevice.findUnique({
+    where: { id: deviceId },
+    select: { id: true, branchId: true },
+  });
+
+  if (!dev) throw new Error("PosDevice not found (deviceId invalid)");
+  if (!dev.branchId) throw new Error("No branch linked to this device");
+  return dev.branchId;
+}
+
 /* ---------------- Create order from Call Center ---------------- */
-router.post('/orders', async (req, res) => {
+router.post("/orders", async (req, res) => {
   try {
     const {
       deviceId,
       branchId,
+      brandId: uiBrandId,
       items = [],
       customerName,
       customerMobile,
@@ -89,6 +135,7 @@ router.post('/orders', async (req, res) => {
     } = req.body as {
       deviceId: string;
       branchId?: string;
+      brandId?: string;
       items: {
         productId: string;
         qty: number;
@@ -100,32 +147,35 @@ router.post('/orders', async (req, res) => {
       notes?: string;
     };
 
-    if (!deviceId) return res.status(400).json({ error: 'deviceId required' });
-    if (!items.length) return res.status(400).json({ error: 'items required' });
+    if (!deviceId) return res.status(400).json({ error: "deviceId required" });
+    if (!items.length) return res.status(400).json({ error: "items required" });
 
     // Determine final branchId
     let finalBranchId: string | null = branchId ?? null;
-
     if (!finalBranchId) {
-      const dev = await prisma.device.findUnique({
-        where: { id: deviceId },
-        select: { id: true, branchId: true },
-      });
-      if (!dev) return res.status(404).json({ error: 'Device not found' });
-      finalBranchId = dev.branchId;
+      finalBranchId = await resolveBranchIdFromPosDeviceOrThrow(deviceId);
+    }
+    if (!finalBranchId) {
+      return res.status(400).json({ error: "No branch linked to this device" });
     }
 
-    if (!finalBranchId) {
-      return res.status(400).json({ error: 'No branch linked to this device' });
+    // Resolve brandId (required)
+    const { brandId: finalBrandId } = await resolveBrandIdOrThrow({
+      uiBrandId,
+      branchId: finalBranchId,
+    });
+
+    if (!finalBrandId) {
+      return res.status(400).json({ error: "brandId required" });
     }
 
     // Upsert/find customer by phone (optional)
-    let customerId: string | undefined = undefined;
+    let customerId: string | null = null;
     if (customerMobile) {
       const cust = await prisma.customer.upsert({
         where: { phone: customerMobile },
-        update: { name: customerName ?? undefined },
-        create: { name: customerName || 'Customer', phone: customerMobile },
+        update: { ...(customerName ? { name: customerName } : {}) },
+        create: { name: customerName || "Customer", phone: customerMobile },
         select: { id: true },
       });
       customerId = cust.id;
@@ -135,16 +185,12 @@ router.post('/orders', async (req, res) => {
     const productIds = items.map((i) => i.productId);
     const products = await prisma.product.findMany({
       where: { id: { in: productIds } },
-      select: {
-        id: true,
-        basePrice: true,
-        taxRate: true, // 0.15 or 15
-      },
+      select: { id: true, basePrice: true, taxRate: true },
     });
     const pMap = new Map(products.map((p) => [p.id, p]));
 
-    // Totals (net & tax from VAT-inclusive prices)
-    let subtotal = new Decimal(0); // ex-VAT
+    // Totals
+    let subtotal = new Decimal(0);
     let taxTotal = new Decimal(0);
 
     const orderItemsData = items.map((i) => {
@@ -156,10 +202,9 @@ router.post('/orders', async (req, res) => {
       const modifiersArr = i.modifiers ?? [];
       const modsTotal = modifiersArr.reduce(
         (acc, m) => acc.add(new Decimal(m.price || 0)),
-        new Decimal(0),
+        new Decimal(0)
       );
 
-      // Treat basePrice as VAT-inclusive (menu price), then add modifiers
       const baseGross = new Decimal(p.basePrice ?? 0);
       const unitGross = baseGross.add(modsTotal);
       const qty = new Decimal(i.qty || 1);
@@ -170,132 +215,142 @@ router.post('/orders', async (req, res) => {
       subtotal = subtotal.add(lineNet);
       taxTotal = taxTotal.add(lineVat);
 
-      // create nested OrderItemModifiers so they show on reopen
       const modifierCreates =
         modifiersArr.length > 0
           ? modifiersArr.map((m) => ({
-              modifierItemId: m.id,
+              modifierItem: { connect: { id: m.id } },
               qty: 1,
               price: m.price ?? 0,
+              brand: { connect: { id: finalBrandId } },
+              device: { connect: { id: deviceId } },
             }))
           : [];
 
-      return {
-        productId: i.productId,
-        // store size NAME so POS can show it directly
+      const row: any = {
+        product: { connect: { id: i.productId } },
         size: i.size?.name || null,
         qty: qty.toNumber(),
-        unitPrice: unitGross, // VAT-inclusive unit price
+        unitPrice: unitGross,
         tax: lineVat,
         total: lineGross,
         notes: notes ?? null,
-        modifiers:
-          modifierCreates.length > 0
-            ? {
-                create: modifierCreates,
-              }
-            : undefined,
+
+        brand: { connect: { id: finalBrandId } },
+        device: { connect: { id: deviceId } },
       };
+
+      if (modifierCreates.length > 0) row.modifiers = { create: modifierCreates };
+      return row;
     });
 
     const netTotal = subtotal.add(taxTotal);
 
-    const baseOrderData: any = {
-      branchId: finalBranchId,
-      customerId,
-      orderNo: await generateOrderNo(),
-      businessDate: todayStart(),
-      status: 'PENDING',
-      subtotal,
-      discountTotal: new Decimal(0),
-      taxTotal,
-      netTotal,
-      items: { create: orderItemsData },
-    };
+    // ✅ IMPORTANT: Always store canonical channel, and do NOT fallback to another value
+    const order = await prisma.order.create({
+      data: {
+        branch: { connect: { id: finalBranchId } },
+        brand: { connect: { id: finalBrandId } },
+        device: { connect: { id: deviceId } },
 
-    let order;
+        ...(customerId ? { customer: { connect: { id: customerId } } } : {}),
 
-    // 1️⃣ Try with the desired values
-    try {
-      order = await prisma.order.create({
-        data: {
-          ...baseOrderData,
-          channel: 'CALLCENTER' as any,
-          orderType: 'PICK_UP' as any,
-        },
-        select: {
-          id: true,
-          status: true,
-          channel: true,
-          orderType: true,
-          orderNo: true,
-          branchId: true,
-          createdAt: true,
-        },
-      });
-      console.log('✅ Callcenter order created with CALLCENTER / PICK_UP');
-    } catch (err: any) {
-      console.error(
-        '❌ Failed to create order with CALLCENTER / PICK_UP, retrying with fallback',
-        err?.message || err
-      );
+        channel: CC_CHANNEL as any,
 
-      // 2️⃣ Fallback: keep channel similar to old code, no forced orderType
-      order = await prisma.order.create({
-        data: {
-          ...baseOrderData,
-          channel: 'CallCenter' as any,
-        },
-        select: {
-          id: true,
-          status: true,
-          channel: true,
-          orderType: true,
-          orderNo: true,
-          branchId: true,
-          createdAt: true,
-        },
-      });
-      console.log('✅ Callcenter order created with fallback channel=CallCenter');
-    }
+        // Your enum doesn't have PICK_UP.
+        // Use TAKE_AWAY (closest) unless you decide to add PICK_UP to enum OrderType.
+        orderType: "TAKE_AWAY" as any,
 
-    // Notify dashboards via SSE as pending initially
-    publishStatus(order.id, 'pending');
+        orderNo: await generateOrderNo(),
+        businessDate: todayStart(),
 
-    // 🔔 NEW: Notify mobile/tablets via WebSocket
-    broadcastCallcenterOrder({
-      ...order,
-      channel: 'CallCenter', // normalize so WS helper sees it
+        status: "PENDING",
+        subtotal,
+        discountTotal: new Decimal(0),
+        taxTotal,
+        netTotal,
+
+        items: { create: orderItemsData },
+      },
+      select: {
+        id: true,
+        status: true,
+        channel: true,
+        orderType: true,
+        orderNo: true,
+        createdAt: true,
+        branch: { select: { id: true } },
+        brand: { select: { id: true } },
+        device: { select: { id: true } },
+      },
     });
+
+    publishStatus(order.id, "pending");
+
+    // ✅ Broadcast exactly what DB has (no rewriting to "CallCenter")
+    broadcastCallcenterOrder(order);
 
     return res.status(201).json(order);
   } catch (e: any) {
-    console.error('POST /api/callcenter/orders FATAL', e);
-    return res.status(500).json({ error: 'Failed to create order' });
+    console.error("POST /api/callcenter/orders FATAL", e);
+    return res.status(500).json({ error: e?.message || "Failed to create order" });
   }
 });
 
 /* ---------------- Device updates order status ---------------- */
-router.patch('/orders/:id', async (req, res) => {
+router.patch("/orders/:id", async (req, res) => {
   try {
     const id = req.params.id;
     const { status, payment } = req.body as {
-      status: 'active' | 'done' | 'declined';
+      status: "active" | "done" | "declined";
       payment?: { method: string; amount: number; ref?: string };
     };
 
-    if (!['active', 'done', 'declined'].includes(status)) {
-      return res.status(400).json({ error: 'Invalid status' });
+    if (!["active", "done", "declined"].includes(status)) {
+      return res.status(400).json({ error: "Invalid status" });
     }
 
-    // Map SSE status -> DB enum
-    let dbStatus: 'ACTIVE' | 'CLOSED' | 'DECLINED';
-    if (status === 'active') dbStatus = 'ACTIVE';
-    else if (status === 'done') dbStatus = 'CLOSED';
-    else dbStatus = 'DECLINED';
+    // Map API status -> DB enum
+    let dbStatus: "ACTIVE" | "CLOSED" | "DECLINED";
+    if (status === "active") dbStatus = "ACTIVE";
+    else if (status === "done") dbStatus = "CLOSED";
+    else dbStatus = "DECLINED";
+
+    // ✅ Only allow updates for CALLCENTER orders
+    const existing = await prisma.order.findFirst({
+      where: {
+        id,
+        channel: { in: [CC_CHANNEL, "CallCenter"] as any }, // support legacy rows
+      },
+      select: {
+        id: true,
+        status: true,
+        channel: true,
+        brandId: true,
+        deviceId: true,
+      },
+    });
+
+    if (!existing) {
+      return res.status(404).json({ error: "CallCenter order not found" });
+    }
+
+    // ✅ Prevent reopening closed/declined CC orders (this is what often causes “comes back ACTIVE”)
+    if (
+      (existing.status === "CLOSED" || existing.status === "DECLINED") &&
+      dbStatus === "ACTIVE"
+    ) {
+      return res.status(409).json({
+        error: "Order already finalized",
+        status: existing.status,
+      });
+    }
 
     const data: any = { status: dbStatus };
-    if (status === 'done') data.closedAt = new Date();
+
+    if (dbStatus === "CLOSED") data.closedAt = new Date();
+
+    // ✅ Normalize channel in DB if legacy row had "CallCenter"
+    if (existing.channel !== CC_CHANNEL) data.channel = CC_CHANNEL;
 
     const updated = await prisma.order.update({
       where: { id },
@@ -305,15 +360,20 @@ router.patch('/orders/:id', async (req, res) => {
         status: true,
         channel: true,
         orderType: true,
-        branchId: true,
         createdAt: true,
+        branch: { select: { id: true } },
+        brand: { select: { id: true } },
+        device: { select: { id: true } },
       },
     });
 
-    if (status === 'done' && payment?.method && payment?.amount != null) {
+    // Create payment when closing
+    if (dbStatus === "CLOSED" && payment?.method && payment?.amount != null) {
       await prisma.payment.create({
         data: {
-          orderId: id,
+          order: { connect: { id } },
+          brand: { connect: { id: updated.brand.id } },
+          device: { connect: { id: updated.device.id } },
           method: payment.method,
           amount: new Decimal(payment.amount),
           ref: payment.ref || null,
@@ -321,38 +381,34 @@ router.patch('/orders/:id', async (req, res) => {
       });
     }
 
-    // SSE update for web dashboard
     publishStatus(updated.id, status);
 
-    // 🔔 NEW: WebSocket update for mobile/tablets
-    if (updated.channel === 'CALLCENTER' || updated.channel === 'CallCenter') {
-      broadcastCallcenterOrder({
-        ...updated,
-        channel: 'CallCenter', // normalize
-      });
+    // ✅ CC broadcast only
+    if (updated.channel === CC_CHANNEL) {
+      broadcastCallcenterOrder(updated);
     }
 
     return res.json(updated);
   } catch (e: any) {
-    console.error('PATCH /api/callcenter/orders/:id ERROR', e);
-    return res.status(500).json({ error: 'Failed to update status' });
+    console.error("PATCH /api/callcenter/orders/:id ERROR", e);
+    return res.status(500).json({ error: e?.message || "Failed to update status" });
   }
 });
 
 /* ---------------- SSE stream for web dashboard ---------------- */
-router.get('/stream', (req, res) => {
-  res.setHeader('Content-Type', 'text/event-stream');
-  res.setHeader('Cache-Control', 'no-cache, no-transform');
-  res.setHeader('Connection', 'keep-alive');
+router.get("/stream", (req, res) => {
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache, no-transform");
+  res.setHeader("Connection", "keep-alive");
 
   const id = Math.random().toString(36).slice(2);
   clients.push({ id, res });
 
   res.write(`: connected ${id}\n\n`);
 
-  const keepAlive = setInterval(() => res.write(': ping\n\n'), 15000);
+  const keepAlive = setInterval(() => res.write(": ping\n\n"), 15000);
 
-  req.on('close', () => {
+  req.on("close", () => {
     clearInterval(keepAlive);
     const idx = clients.findIndex((c) => c.id === id);
     if (idx >= 0) clients.splice(idx, 1);

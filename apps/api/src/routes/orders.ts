@@ -3,13 +3,10 @@ import { Router } from "express";
 import { prisma } from "../db";
 import { requireAuth } from "../middleware/auth";
 import { z } from "zod";
-import {
-  broadcastCallcenterOrder,
-  broadcastDashboardTick,
-} from "../ws";
+import { broadcastCallcenterOrder, broadcastDashboardTick } from "../ws";
 
-// 👇 NEW: import Prisma + DiscountType so we can store discountKind/discountValue
-import { Prisma, DiscountType } from "@prisma/client";
+// Prisma
+import { Prisma, DiscountType, OrderChannel } from "@prisma/client";
 
 const router = Router();
 
@@ -47,7 +44,7 @@ async function publishOrderEvent(eventType: string, order: any) {
     const producer = await getProducer();
 
     await producer.send({
-      topic: "orders", // 🔔 your Kafka topic name
+      topic: "orders",
       messages: [
         {
           key: order.branchId ? String(order.branchId) : undefined,
@@ -86,32 +83,86 @@ function parseDay(day?: string | null): Date | null {
   return isNaN(d.getTime()) ? null : d;
 }
 
-/* ------------------------------------------------------------------ */
-/* GET /orders – list orders with filters (NO auth for now)           */
-/* ------------------------------------------------------------------ */
+/* -------------------- helper: safe string -------------------- */
+function s(v: any): string | null {
+  if (v == null) return null;
+  const out = String(v).trim();
+  return out ? out : null;
+}
 
-router.get("/", async (req, res) => {
+/* -------------------- channel normalization -------------------- */
+/**
+ * IMPORTANT:
+ * Prisma enum is only: POS | CALLCENTER
+ * - We can ACCEPT legacy query/body values like "CallCenter"
+ * - But we must always query/store ONLY valid enum values.
+ */
+function normalizeChannel(input?: any): OrderChannel {
+  const raw = String(input ?? "POS").trim();
+  const u = raw.toUpperCase();
+
+  // accept legacy spelling from old clients
+  if (u === "CALLCENTER" || raw === "CallCenter") return OrderChannel.CALLCENTER;
+
+  return OrderChannel.POS;
+}
+
+function isCallCenterChannel(ch?: any) {
+  // extra-safe (even though DB enum should only ever be POS/CALLCENTER)
+  return (
+    ch === OrderChannel.CALLCENTER ||
+    ch === "CALLCENTER" ||
+    ch === "CallCenter"
+  );
+}
+
+/* ------------------------------------------------------------------ */
+/* GET /orders – list orders with filters (PROTECTED + brand aware)   */
+/* ------------------------------------------------------------------ */
+/**
+ * Optional query params:
+ * - brandId ("ALL" or missing => all allowed brands)
+ * - branchId
+ * - date (YYYY-MM-DD)
+ * - dateFrom/dateTo (YYYY-MM-DD)
+ * - status
+ * - channel (POS/CALLCENTER/CallCenter)
+ */
+router.get("/", requireAuth, async (req: any, res) => {
   try {
-    const { branchId, date, dateFrom, dateTo, status, channel } = req.query as {
+    const {
+      brandId: qBrandId,
+      branchId: qBranchId,
+      date,
+      dateFrom,
+      dateTo,
+      status,
+      channel,
+    } = req.query as {
+      brandId?: string;
       branchId?: string;
-      date?: string; // from UI (YYYY-MM-DD)
-      dateFrom?: string; // optional range
-      dateTo?: string; // optional range
+      date?: string;
+      dateFrom?: string;
+      dateTo?: string;
       status?: string;
       channel?: string;
     };
 
+    const brandId = s(qBrandId);
+    const branchId = s(qBranchId);
+
     console.log("🔎 GET /orders query:", req.query);
 
-    // ----- build businessDate filter -----
+    // ------------------------------------------------------------
+    // Date filters
+    // ------------------------------------------------------------
     let dateFilter: any = {};
 
-    // 1) Single-date filter (?date=YYYY-MM-DD)
     if (date && date.trim() !== "") {
       const start = parseDay(date);
       if (start) {
         const end = new Date(start);
-        end.setDate(end.getDate() + 1); // [start, end)
+        end.setDate(end.getDate() + 1);
 
         dateFilter = {
           businessDate: {
@@ -120,9 +171,7 @@ router.get("/", async (req, res) => {
           },
         };
       }
-    }
-    // 2) Range filter (?dateFrom / ?dateTo)
-    else if (dateFrom || dateTo) {
+    } else if (dateFrom || dateTo) {
       const start =
         parseDay(dateFrom ?? "") ?? new Date("1970-01-01T00:00:00");
       const end = dateTo
@@ -139,39 +188,71 @@ router.get("/", async (req, res) => {
 
     console.log("📅 dateFilter:", JSON.stringify(dateFilter, null, 2));
 
-    // normalize channel from mobile/UI ("CALLCENTER") to DB ("CallCenter")
+    // ------------------------------------------------------------
+    // Channel filter (enum safe)
+    // ------------------------------------------------------------
     let channelFilter: any = {};
     if (channel) {
-      channelFilter = {
-        channel:
-          channel.toUpperCase() === "CALLCENTER" ? "CallCenter" : channel,
-      };
+      const norm = normalizeChannel(channel);
+      channelFilter = { channel: norm };
     }
 
+    // ------------------------------------------------------------
+    // ✅ Brand filter + RBAC
+    // req.user should have allowAllBrands / allowedBrandIds
+    // ------------------------------------------------------------
+    const user = req.user;
+
+    const where: any = {
+      ...(branchId ? { branchId } : {}),
+      ...(status ? { status } : {}),
+      ...channelFilter,
+      ...dateFilter,
+    };
+
+    const wantsAllBrands = !brandId || brandId === "ALL";
+
+    if (!user?.allowAllBrands) {
+      const allowedIds: string[] = Array.isArray(user?.allowedBrandIds)
+        ? user.allowedBrandIds
+        : [];
+
+      if (!allowedIds.length) {
+        // user has no allowed brands => return empty
+        return res.json([]);
+      }
+
+      if (wantsAllBrands) {
+        where.brandId = { in: allowedIds };
+      } else {
+        if (!allowedIds.includes(brandId)) {
+          // selected a brand they don't have access to
+          return res.json([]);
+        }
+        where.brandId = brandId;
+      }
+    } else {
+      // allowAllBrands === true
+      if (!wantsAllBrands) {
+        where.brandId = brandId;
+      }
+    }
+
+    // (Optional) debug:
+    console.log("🧾 GET /orders where:", JSON.stringify(where, null, 2));
+
     const rows = await prisma.order.findMany({
-      where: {
-        ...(branchId ? { branchId } : {}),
-        ...(status ? { status } : {}),
-        ...channelFilter,
-        ...dateFilter,
-      },
+      where,
       orderBy: { createdAt: "desc" },
       take: 200,
       include: {
-        branch: {
-          select: { id: true, name: true },
-        },
+        branch: { select: { id: true, name: true } },
         items: {
           include: {
-            product: {
-              // 👇 include categoryId so mobile can know category
-              select: { id: true, name: true, categoryId: true },
-            },
+            product: { select: { id: true, name: true, categoryId: true } },
             modifiers: {
               include: {
-                modifierItem: {
-                  select: { id: true, name: true, price: true },
-                },
+                modifierItem: { select: { id: true, name: true, price: true } },
               },
             },
           },
@@ -182,14 +263,10 @@ router.get("/", async (req, res) => {
 
     console.log("✅ GET /orders returning", rows.length, "rows");
 
-    // 🔁 Override orderType for CallCenter in RESPONSE only
     const transformed = rows.map((o: any) => {
-      // DB stores "CallCenter" for callcenter channel
-      if (o.channel === "CallCenter") {
-        return {
-          ...o,
-          orderType: "PICK_UP", // 👈 show PICK_UP for callcenter orders
-        };
+      // normalize response
+      if (isCallCenterChannel(o.channel)) {
+        return { ...o, channel: "CALLCENTER", orderType: "PICK_UP" };
       }
       return o;
     });
@@ -202,14 +279,19 @@ router.get("/", async (req, res) => {
 });
 
 /* ------------------------------------------------------------------ */
-/* POST /orders – create order (protected, now with modifiers)        */
+/* POST /orders – create order (protected, with modifiers)            */
 /* ------------------------------------------------------------------ */
 
 const OrderDto = z.object({
   branchId: z.string(),
-  channel: z.enum(["POS", "CallCenter", "Aggregator"]).default("POS"),
 
-  // ⭐ NEW: optional customerId (for CallCenter or POS creating orders)
+  // accept legacy + canonical, normalize later
+  channel: z.enum(["POS", "CALLCENTER", "CallCenter"]).default("POS"),
+
+  // brandId/deviceId required by your schema (Order has required brandId/deviceId)
+  brandId: z.string().optional(),
+  deviceId: z.string().optional(),
+
   customerId: z.string().optional().nullable(),
 
   items: z.array(
@@ -218,19 +300,18 @@ const OrderDto = z.object({
       size: z.string().optional(),
       qty: z.number().positive(),
       unitPrice: z.number().nonnegative(),
-
-      // 🔥 modifiers per item
       modifiers: z
         .array(
           z.object({
             modifierItemId: z.string(),
-            qty: z.number().int().positive().optional(), // default 1
-            price: z.number().nonnegative().optional(), // optional override
+            qty: z.number().int().positive().optional(),
+            price: z.number().nonnegative().optional(),
           })
         )
         .optional(),
     })
   ),
+
   payments: z
     .array(
       z.object({
@@ -246,33 +327,42 @@ router.post("/", requireAuth, async (req, res) => {
   try {
     const parsed = OrderDto.parse(req.body);
 
+    const channelNorm = normalizeChannel(parsed.channel);
+
+    const brandId = s(parsed.brandId);
+    const deviceId = s(parsed.deviceId);
+
+    if (!brandId) return res.status(400).json({ error: "brandId_required" });
+    if (!deviceId) return res.status(400).json({ error: "deviceId_required" });
+
     const vatRate = Number(process.env.DEFAULT_VAT_RATE ?? "0.15");
 
     let subtotal = 0;
     let taxTotal = 0;
-    let discountTotal = 0; // hook for later discounts
+    let discountTotal = 0;
 
     const itemCreates: any[] = [];
 
     for (const line of parsed.items) {
       const base = line.qty * line.unitPrice;
 
-      // --- modifiers for this line ---
       let modsSubtotal = 0;
       const modifierCreates: any[] = [];
 
       if (line.modifiers && line.modifiers.length) {
         for (const m of line.modifiers) {
           const mQty = m.qty ?? 1;
-          const mPrice = m.price ?? 0; // or look up ModifierItem.price in DB
+          const mPrice = m.price ?? 0;
           const modLine = mQty * mPrice;
 
           modsSubtotal += modLine;
 
           modifierCreates.push({
-            modifierItemId: m.modifierItemId,
+            modifierItem: { connect: { id: m.modifierItemId } },
             qty: mQty,
             price: mPrice,
+            brand: { connect: { id: brandId } },
+            device: { connect: { id: deviceId } },
           });
         }
       }
@@ -284,64 +374,66 @@ router.post("/", requireAuth, async (req, res) => {
       subtotal += lineSubtotal;
       taxTotal += lineTax;
 
-      itemCreates.push({
-        productId: line.productId,
-        size: line.size,
+      const itemRow: any = {
+        product: { connect: { id: line.productId } },
+        size: line.size ?? null,
         qty: line.qty,
-        unitPrice: line.unitPrice,
-        tax: lineTax,
-        total: lineTotal,
-        modifiers:
-          modifierCreates.length > 0
-            ? {
-                create: modifierCreates,
-              }
-            : undefined,
-      });
+        unitPrice: new Prisma.Decimal(line.unitPrice),
+        tax: new Prisma.Decimal(lineTax),
+        total: new Prisma.Decimal(lineTotal),
+
+        brand: { connect: { id: brandId } },
+        device: { connect: { id: deviceId } },
+      };
+
+      if (modifierCreates.length > 0) {
+        itemRow.modifiers = { create: modifierCreates };
+      }
+
+      itemCreates.push(itemRow);
     }
 
     const netTotal = subtotal + taxTotal - discountTotal;
 
     const hasPayments = parsed.payments && parsed.payments.length > 0;
 
-    // 🔸 status rules:
-    //   - CallCenter  → PENDING (will be ACCEPT / DECLINE later)
-    //   - others      → ACTIVE if not paid, CLOSED if paid
-    const isCallCenter = parsed.channel === "CallCenter";
-    const status = isCallCenter
-      ? "PENDING"
-      : hasPayments
-      ? "CLOSED"
-      : "ACTIVE";
+    const isCallCenter = channelNorm === OrderChannel.CALLCENTER;
+    const status = isCallCenter ? "PENDING" : hasPayments ? "CLOSED" : "ACTIVE";
 
     const order = await prisma.order.create({
       data: {
-        branchId: parsed.branchId,
-        channel: parsed.channel,
+        branch: { connect: { id: parsed.branchId } },
+        brand: { connect: { id: brandId } },
+        device: { connect: { id: deviceId } },
+
+        // ✅ store only valid enum
+        channel: channelNorm,
+
         orderNo: "SO-" + Date.now(),
         businessDate: new Date(),
         status,
-        subtotal,
-        taxTotal,
-        discountTotal,
-        netTotal,
+
+        subtotal: new Prisma.Decimal(subtotal),
+        taxTotal: new Prisma.Decimal(taxTotal),
+        discountTotal: new Prisma.Decimal(discountTotal),
+        netTotal: new Prisma.Decimal(netTotal),
+
         closedAt: hasPayments ? new Date() : null,
 
-        // ⭐ NEW: save customerId if provided
         ...(parsed.customerId
-          ? { customerId: parsed.customerId }
+          ? { customer: { connect: { id: parsed.customerId } } }
           : {}),
 
-        items: {
-          create: itemCreates,
-        },
+        items: { create: itemCreates },
 
         payments: hasPayments
           ? {
               create: parsed.payments!.map((p) => ({
+                brand: { connect: { id: brandId } },
+                device: { connect: { id: deviceId } },
                 method: p.method,
-                amount: p.amount,
-                ref: p.ref,
+                amount: new Prisma.Decimal(p.amount),
+                ref: p.ref ?? null,
               })),
             }
           : undefined,
@@ -350,14 +442,10 @@ router.post("/", requireAuth, async (req, res) => {
         branch: { select: { id: true, name: true } },
         items: {
           include: {
-            product: {
-              select: { id: true, name: true, categoryId: true }, // 👈 here too
-            },
+            product: { select: { id: true, name: true, categoryId: true } },
             modifiers: {
               include: {
-                modifierItem: {
-                  select: { id: true, name: true, price: true },
-                },
+                modifierItem: { select: { id: true, name: true, price: true } },
               },
             },
           },
@@ -366,15 +454,16 @@ router.post("/", requireAuth, async (req, res) => {
       },
     });
 
-    // 🔔 WebSocket: if this is a CallCenter order, notify via WS
-    if (order.channel === "CallCenter") {
-      broadcastCallcenterOrder(order);
+    if (isCallCenterChannel(order.channel)) {
+      broadcastCallcenterOrder({
+        ...order,
+        channel: "CALLCENTER",
+        orderType: "PICK_UP",
+      });
     }
 
-    // 🔔 Kafka: publish ORDER_CREATED event (no-op if Kafka disabled)
     await publishOrderEvent("ORDER_CREATED", order);
 
-    // 🔔 Dashboard WS: notify dashboards to refresh
     broadcastDashboardTick({
       reason: "ORDER_CREATED",
       orderId: order.id,
@@ -395,7 +484,7 @@ router.post("/", requireAuth, async (req, res) => {
 });
 
 /* ------------------------------------------------------------------ */
-/* GET /orders/:id – single order (for reopen, callcenter, etc.)      */
+/* GET /orders/:id – single order                                     */
 /* ------------------------------------------------------------------ */
 
 router.get("/:id", async (req, res) => {
@@ -408,15 +497,10 @@ router.get("/:id", async (req, res) => {
         branch: { select: { id: true, name: true } },
         items: {
           include: {
-            product: {
-              // 👇 IMPORTANT: send categoryId so mobile can pick category
-              select: { id: true, name: true, categoryId: true },
-            },
+            product: { select: { id: true, name: true, categoryId: true } },
             modifiers: {
               include: {
-                modifierItem: {
-                  select: { id: true, name: true, price: true },
-                },
+                modifierItem: { select: { id: true, name: true, price: true } },
               },
             },
           },
@@ -425,53 +509,87 @@ router.get("/:id", async (req, res) => {
       },
     });
 
-    if (!order) {
-      return res.status(404).json({ error: "Order not found" });
-    }
+    if (!order) return res.status(404).json({ error: "Order not found" });
 
-    // 🔁 Override orderType for CallCenter in RESPONSE only
-    const transformed =
-      order.channel === "CallCenter"
-        ? { ...order, orderType: "PICK_UP" }
-        : order;
+    const transformed = isCallCenterChannel(order.channel)
+      ? { ...order, channel: "CALLCENTER", orderType: "PICK_UP" }
+      : order;
 
     return res.json(transformed);
   } catch (err: any) {
     console.error("GET /orders/:id ERROR", err);
-    return res
-      .status(500)
-      .json({ error: "Failed to load order", details: String(err) });
+    return res.status(500).json({
+      error: "Failed to load order",
+      details: String(err),
+    });
   }
 });
 
 /* ------------------------------------------------------------------ */
-/* POST /orders/:id/close – close POS order                           */
+/* POST /orders/:id/close – close order (POS + supports CALLCENTER)    */
 /* ------------------------------------------------------------------ */
 
 router.post("/:id/close", async (req, res) => {
   try {
     const { id } = req.params;
+
     const {
+      brandId: bodyBrandId,
+      deviceId: bodyDeviceId,
+
       vatRate,
       subtotalEx,
       vatAmount,
       total,
-      orderType, // currently unused (no field in Order?)
+
       items = [],
       payments = [],
 
-      // 👇 discount fields from POS / UI
       discountAmount,
       discount,
 
-      // ⭐ NEW: customerId from POS UI
       customerId,
     } = req.body || {};
+
+    // ✅ load current order (so we always have brandId/branchId/deviceId)
+    const existing = await prisma.order.findUnique({
+      where: { id },
+      select: {
+        id: true,
+        brandId: true,
+        branchId: true,
+        deviceId: true,
+        channel: true,
+        status: true,
+      },
+    });
+
+    if (!existing) return res.status(404).json({ error: "Order not found" });
+
+    // Prevent re-closing
+    if (existing.status === "CLOSED") {
+      return res.status(200).json({ ok: true, alreadyClosed: true });
+    }
+
+    const finalBrandId = s(bodyBrandId) || s(existing.brandId);
+    const finalDeviceId = s(bodyDeviceId) || s(existing.deviceId);
+
+    if (!finalBrandId) {
+      return res.status(400).json({
+        error: "brandId_required",
+        details: "Missing brandId for closing order (order or payload).",
+      });
+    }
+    if (!finalDeviceId) {
+      return res.status(400).json({
+        error: "deviceId_required",
+        details: "Missing deviceId for closing order (order or payload).",
+      });
+    }
 
     const vatFraction =
       typeof vatRate === "number" && vatRate > 0 ? vatRate / 100 : 0;
 
-    // ---------- NEW: compute discountTotal / kind / value ----------
     const discountTotalValue =
       typeof discountAmount === "number"
         ? discountAmount
@@ -484,46 +602,39 @@ router.post("/:id/close", async (req, res) => {
 
     if (discount && discount.kind && discount.value != null) {
       const kindUpper = String(discount.kind).toUpperCase();
-      if (kindUpper === "PERCENT" || kindUpper === "PERCENTAGE") {
-        discountKindForDb = DiscountType.PERCENTAGE;
-      } else {
-        // "AMOUNT" or anything else → FIXED
-        discountKindForDb = DiscountType.FIXED;
-      }
+      discountKindForDb =
+        kindUpper === "PERCENT" || kindUpper === "PERCENTAGE"
+          ? DiscountType.PERCENTAGE
+          : DiscountType.FIXED;
+
       discountValueForDb = new Prisma.Decimal(discount.value);
     }
-
-    console.log("💸 /orders/:id/close discount debug", {
-      discountAmount,
-      discountFromObj: discount?.amount,
-      discountTotalValue,
-      discountKindForDb,
-      discountValueForDb: discountValueForDb?.toString(),
-      customerId, // ⭐ debug
-    });
 
     const updated = await prisma.order.update({
       where: { id },
       data: {
         status: "CLOSED",
-        taxTotal: vatAmount ?? 0,
-        subtotal: subtotalEx ?? 0,
-        netTotal: total ?? 0,
-        // 🔸 do NOT touch channel here
+        taxTotal: new Prisma.Decimal(vatAmount ?? 0),
+        subtotal: new Prisma.Decimal(subtotalEx ?? 0),
+        netTotal: new Prisma.Decimal(total ?? 0),
         closedAt: new Date(),
 
-        // ⬇ NEW: persist discount meta on close
+        // Keep relations consistent
+        brand: { connect: { id: finalBrandId } },
+        device: { connect: { id: finalDeviceId } },
+
         discountTotal: new Prisma.Decimal(discountTotalValue),
         discountKind: discountKindForDb,
         discountValue: discountValueForDb,
 
-        // ⭐ NEW: attach / override customerId when closing (if provided)
-        ...(customerId ? { customerId: String(customerId) } : {}),
+        ...(customerId
+          ? { customer: { connect: { id: String(customerId) } } }
+          : {}),
 
-        // 🔹 Replace all existing items with new ones from payload
+        // ✅ Replace items
         items: {
           deleteMany: {},
-          create: items.map((it: any) => {
+          create: (items || []).map((it: any) => {
             const qty = Number(it.qty || 0);
             const unitPrice = Number(it.unitPrice || 0);
             const lineTotal = qty * unitPrice;
@@ -534,47 +645,73 @@ router.post("/:id/close", async (req, res) => {
               lineTax = lineTotal - exVat;
             }
 
-            return {
-              productId: it.productId,
-              size: it.sizeName ?? null,
+            const row: any = {
+              brand: { connect: { id: finalBrandId } },
+              device: { connect: { id: finalDeviceId } },
+              product: { connect: { id: String(it.productId) } },
+
+              size: it.sizeName ?? it.size ?? null,
               qty,
-              unitPrice,
-              tax: lineTax,
-              total: lineTotal,
-              modifiers:
-                it.modifiers && it.modifiers.length > 0
-                  ? {
-                      create: it.modifiers.map((m: any) => ({
-                        modifierItemId: m.modifierItemId ?? m.itemId,
-                        price: m.price ?? 0,
-                        qty: m.qty ?? 1,
-                      })),
-                    }
-                  : undefined,
+              unitPrice: new Prisma.Decimal(unitPrice),
+              tax: new Prisma.Decimal(lineTax),
+              total: new Prisma.Decimal(lineTotal),
+              notes: it.notes ?? null,
             };
+
+            // Modifiers: accept multiple payload shapes
+            const mods = Array.isArray(it.modifiers) ? it.modifiers : [];
+            if (mods.length > 0) {
+              row.modifiers = {
+                create: mods.map((m: any) => {
+                  const modifierItemId =
+                    m.modifierItemId ?? m.itemId ?? m.id ?? m.modifierId;
+
+                  return {
+                    brand: { connect: { id: finalBrandId } },
+                    device: { connect: { id: finalDeviceId } },
+                    modifierItem: { connect: { id: String(modifierItemId) } },
+                    price: new Prisma.Decimal(m.price ?? 0),
+                    qty: m.qty ?? 1,
+                  };
+                }),
+              };
+            }
+
+            return row;
           }),
         },
 
-        // 🔹 Replace payments
+        // ✅ Replace payments
         payments: {
           deleteMany: {},
-          create: payments.map((p: any) => ({
-            method: String(p.methodName ?? p.methodId ?? "UNKNOWN"),
-            amount: Number(p.amount || 0),
-          })),
+          create: (payments || []).map((p: any) => {
+            const methodName = String(p.methodName ?? p.method ?? "UNKNOWN");
+            const amount = Number(p.amount ?? 0);
+
+            const payRow: any = {
+              brand: { connect: { id: finalBrandId } },
+              device: { connect: { id: finalDeviceId } },
+              method: methodName,
+              amount: new Prisma.Decimal(amount),
+              ref: p.ref ?? null,
+            };
+
+            // Optional link to PaymentMethod if you send methodId
+            if (p.methodId) {
+              payRow.paymentMethod = { connect: { id: String(p.methodId) } };
+            }
+
+            return payRow;
+          }),
         },
       },
       include: {
         items: {
           include: {
-            product: {
-              select: { id: true, name: true, categoryId: true }, // 👈 here
-            },
+            product: { select: { id: true, name: true, categoryId: true } },
             modifiers: {
               include: {
-                modifierItem: {
-                  select: { id: true, name: true, price: true },
-                },
+                modifierItem: { select: { id: true, name: true, price: true } },
               },
             },
           },
@@ -583,30 +720,20 @@ router.post("/:id/close", async (req, res) => {
       },
     });
 
-    console.log("✅ /orders/:id/close updated order", {
-      id: updated.id,
-      orderNo: updated.orderNo,
-      customerId: updated.customerId, // ⭐ debug
-      discountTotal: updated.discountTotal.toString(),
-      discountKind: updated.discountKind,
-      discountValue: updated.discountValue?.toString(),
-    });
+    const transformed = isCallCenterChannel(updated.channel)
+      ? { ...updated, channel: "CALLCENTER", orderType: "PICK_UP" }
+      : updated;
 
-    // Also apply the same override on close response
-    const transformed =
-      updated.channel === "CallCenter"
-        ? { ...updated, orderType: "PICK_UP" }
-        : updated;
-
-    // 🔔 WebSocket: if it's a CallCenter order, broadcast updated status
-    if (updated.channel === "CallCenter") {
-      broadcastCallcenterOrder(updated);
+    if (isCallCenterChannel(updated.channel)) {
+      broadcastCallcenterOrder({
+        ...updated,
+        channel: "CALLCENTER",
+        orderType: "PICK_UP",
+      });
     }
 
-    // 🔔 Kafka: publish ORDER_CLOSED event
     await publishOrderEvent("ORDER_CLOSED", updated);
 
-    // 🔔 Dashboard WS: notify dashboards
     broadcastDashboardTick({
       reason: "ORDER_CLOSED",
       orderId: updated.id,
@@ -617,9 +744,10 @@ router.post("/:id/close", async (req, res) => {
     return res.json(transformed);
   } catch (err: any) {
     console.error("POST /orders/:id/close ERROR", err);
-    return res
-      .status(500)
-      .json({ error: "Failed to close order", details: String(err) });
+    return res.status(500).json({
+      error: "Failed to close order",
+      details: String(err),
+    });
   }
 });
 
@@ -647,9 +775,7 @@ router.post("/:id/void", requireAuth, async (req: any, res) => {
       },
     });
 
-    if (!order) {
-      return res.status(404).json({ error: "Order not found" });
-    }
+    if (!order) return res.status(404).json({ error: "Order not found" });
 
     if (order.status === "CLOSED") {
       return res.status(400).json({ error: "Cannot void a CLOSED order" });
@@ -664,26 +790,21 @@ router.post("/:id/void", requireAuth, async (req: any, res) => {
       data: {
         status: "VOID",
         voidedAt: new Date(),
-        voidedById: req.user.id, // from requireAuth
+        voidedById: req.user.id,
       },
     });
 
-    // 🔔 WebSocket: if it was a CallCenter order, broadcast void
-    if (order.channel === "CallCenter") {
-      // we can use original order info for branchId/createdAt + new status
+    if (isCallCenterChannel(order.channel)) {
       broadcastCallcenterOrder({
         ...order,
+        channel: "CALLCENTER",
         status: "VOID",
+        orderType: "PICK_UP",
       });
     }
 
-    // 🔔 Kafka: publish ORDER_VOIDED event (using original + new status)
-    await publishOrderEvent("ORDER_VOIDED", {
-      ...order,
-      status: "VOID",
-    });
+    await publishOrderEvent("ORDER_VOIDED", { ...order, status: "VOID" });
 
-    // 🔔 Dashboard WS: notify dashboards
     broadcastDashboardTick({
       reason: "ORDER_VOIDED",
       orderId: updated.id,
@@ -711,27 +832,23 @@ router.post("/:id/callcenter-accept", requireAuth, async (req, res) => {
 
     const updated = await prisma.order.update({
       where: { id },
-      data: {
-        status: "ACTIVE",
-        // orderType stays as-is in DB; we override to PICK_UP in responses
-      },
+      data: { status: "ACTIVE" },
     });
 
-    // apply override in response too
-    const transformed =
-      updated.channel === "CallCenter"
-        ? { ...updated, orderType: "PICK_UP" }
-        : updated;
+    const transformed = isCallCenterChannel(updated.channel)
+      ? { ...updated, channel: "CALLCENTER", orderType: "PICK_UP" }
+      : updated;
 
-    // 🔔 WebSocket: broadcast status change to mobile
-    if (updated.channel === "CallCenter") {
-      broadcastCallcenterOrder(updated);
+    if (isCallCenterChannel(updated.channel)) {
+      broadcastCallcenterOrder({
+        ...updated,
+        channel: "CALLCENTER",
+        orderType: "PICK_UP",
+      });
     }
 
-    // 🔔 Kafka: publish ORDER_ACCEPTED event
     await publishOrderEvent("ORDER_ACCEPTED", updated);
 
-    // 🔔 Dashboard WS: notify dashboards
     broadcastDashboardTick({
       reason: "ORDER_ACCEPTED",
       orderId: updated.id,
@@ -756,21 +873,19 @@ router.post("/:id/callcenter-decline", requireAuth, async (req, res) => {
 
     const updated = await prisma.order.update({
       where: { id },
-      data: {
-        status: "DECLINED",
-        // declineReason: req.body.reason ?? null, // if you add this field
-      },
+      data: { status: "DECLINED" },
     });
 
-    // 🔔 WebSocket: broadcast status change to mobile
-    if (updated.channel === "CallCenter") {
-      broadcastCallcenterOrder(updated);
+    if (isCallCenterChannel(updated.channel)) {
+      broadcastCallcenterOrder({
+        ...updated,
+        channel: "CALLCENTER",
+        orderType: "PICK_UP",
+      });
     }
 
-    // 🔔 Kafka: publish ORDER_DECLINED event
     await publishOrderEvent("ORDER_DECLINED", updated);
 
-    // 🔔 Dashboard WS: notify dashboards
     broadcastDashboardTick({
       reason: "ORDER_DECLINED",
       orderId: updated.id,

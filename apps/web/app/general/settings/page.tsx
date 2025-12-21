@@ -1,1629 +1,1118 @@
 "use client";
 
-import { useEffect, useState } from "react";
-import { Loader2 } from "lucide-react";
+import React, { useEffect, useMemo, useState } from "react";
 import { useRouter } from "next/navigation";
+import { authStore } from "@/lib/auth-store";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:4000";
+const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:4000";
 
-/* ------------------- shared helpers ------------------- */
+/* ----------------------------- types ----------------------------- */
+
+type Organization = {
+  id: string;
+  code: string;
+  name: string;
+  isActive: boolean;
+  createdAt?: string;
+
+  // ERP fields
+  phone?: string | null;
+  mobile?: string | null;
+  email?: string | null;
+  website?: string | null;
+  emailDomain?: string | null;
+  color?: string | null;
+
+  vatNumber?: string | null;
+  licenseType?: string | null;
+  licenseNo?: string | null;
+  companyId?: string | null;
+  currency?: string | null;
+
+  addressLine1?: string | null;
+  addressLine2?: string | null;
+  buildingNumber?: string | null;
+  additionalNumber?: string | null;
+  district?: string | null;
+  city?: string | null;
+  state?: string | null;
+  postalCode?: string | null;
+  country?: string | null;
+
+  logoMediaId?: string | null;
+  logoUrl?: string | null;
+};
+
+type Brand = {
+  id: string;
+  code: string;
+  name: string;
+  isActive: boolean;
+  organizationId: string;
+  organization?: Organization;
+  createdAt?: string;
+};
+
+/* ----------------------------- helpers ----------------------------- */
 
 function getToken() {
   if (typeof window === "undefined") return "";
-  return (
-    localStorage.getItem("token") ||
-    localStorage.getItem("pos_token") ||
-    ""
-  );
+  try {
+    // ✅ support all common keys used in your project
+    return (
+      localStorage.getItem("token") ||
+      localStorage.getItem("accessToken") ||
+      localStorage.getItem("access_token") ||
+      localStorage.getItem("pos_token") ||
+      ""
+    );
+  } catch {
+    return "";
+  }
 }
 
-async function fetchJson<T>(input: string, init?: RequestInit): Promise<T> {
+async function api<T>(path: string, data?: any): Promise<T> {
   const token = getToken();
 
-  const res = await fetch(input, {
-    ...init,
+  const res = await fetch(`${API}${path}`, {
+    method: data ? "POST" : "GET",
     headers: {
-      "Content-Type": "application/json",
+      ...(data ? { "Content-Type": "application/json" } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(init?.headers || {}),
     },
+    body: data ? JSON.stringify(data) : undefined,
+    cache: "no-store",
     credentials: "include",
   });
 
-  if (!res.ok) {
-    const data = await res.json().catch(() => null);
-    throw new Error(data?.message || `Request failed: ${res.status}`);
-  }
-  return res.json();
-}
-
-// simple generic uploader (uses same endpoint as receipt logo)
-async function uploadSettingImage(file: File): Promise<string> {
-  const token = getToken();
-  const form = new FormData();
-  form.append("file", file);
-
-  const res = await fetch(`${API_BASE}/upload/receipt-logo`, {
-    method: "POST",
-    headers: {
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-    },
-    body: form,
-  });
-
-  if (!res.ok) {
-    const data = await res.json().catch(() => null);
-    throw new Error(data?.message || "Upload failed");
+  // ✅ central 401 handling
+  if (res.status === 401) {
+    authStore.expire("Session expired. Please log in again.");
+    throw new Error("Unauthorized (401). Please login again.");
   }
 
-  const data = await res.json();
-  return data.url as string;
+  const text = await res.text().catch(() => "");
+  let json: any = null;
+  try {
+    json = text ? JSON.parse(text) : null;
+  } catch {
+    // ignore
+  }
+
+  if (!res.ok) {
+    const msg =
+      json?.message ||
+      json?.error ||
+      (text ? text.slice(0, 280) : "") ||
+      `HTTP ${res.status}`;
+    throw new Error(`API ${res.status}: ${msg}`);
+  }
+
+  return (json ?? ({} as any)) as T;
 }
 
-/* -------------------- UI primitives -------------------- */
+function cx(...classes: Array<string | false | null | undefined>) {
+  return classes.filter(Boolean).join(" ");
+}
 
-type ButtonProps = React.ButtonHTMLAttributes<HTMLButtonElement> & {
-  variant?: "primary" | "ghost" | "pill" | "pill-active";
-};
+/* ----------------------------- small UI atoms ----------------------------- */
+
+function Pill({ active }: { active: boolean }) {
+  return (
+    <span
+      className={cx(
+        "inline-flex items-center rounded-full px-2 py-0.5 text-xs font-medium",
+        active
+          ? "bg-emerald-50 text-emerald-700 ring-1 ring-emerald-200"
+          : "bg-zinc-100 text-zinc-700 ring-1 ring-zinc-200"
+      )}
+    >
+      {active ? "Active" : "Inactive"}
+    </span>
+  );
+}
 
 function Button({
-  variant = "primary",
-  className = "",
   children,
-  ...rest
-}: ButtonProps) {
-  let base =
-    "inline-flex items-center justify-center rounded px-4 py-2 text-sm font-medium focus:outline-none focus:ring-2 focus:ring-offset-1";
+  variant = "primary",
+  className,
+  ...props
+}: React.ButtonHTMLAttributes<HTMLButtonElement> & {
+  variant?: "primary" | "secondary" | "ghost" | "danger";
+}) {
+  const base =
+    "inline-flex items-center justify-center gap-2 rounded-lg px-3.5 py-2 text-sm font-medium transition focus:outline-none focus:ring-2 focus:ring-zinc-900/10 disabled:opacity-50 disabled:cursor-not-allowed";
 
-  if (variant === "primary") {
-    base += " bg-black text-white hover:bg-black/80 focus:ring-black";
-  } else if (variant === "pill-active") {
-    base +=
-      " bg-black text-white hover:bg-black/80 focus:ring-black rounded-full px-3 py-1 text-xs";
-  } else if (variant === "pill") {
-    base +=
-      " bg-white text-black border border-gray-300 hover:bg-gray-100 rounded-full px-3 py-1 text-xs";
-  } else {
-    // ghost
-    base += " bg-transparent text-gray-600 hover:bg-gray-100";
-  }
+  // ✅ black buttons (primary + secondary)
+  const styles =
+    variant === "primary"
+      ? "bg-black text-white hover:bg-zinc-900"
+      : variant === "secondary"
+      ? "bg-black text-white hover:bg-zinc-900"
+      : variant === "danger"
+      ? "bg-rose-600 text-white hover:bg-rose-500"
+      : "bg-transparent text-zinc-700 hover:bg-zinc-100";
 
   return (
-    <button className={`${base} ${className}`} {...rest}>
+    <button className={cx(base, styles, className)} {...props}>
       {children}
     </button>
   );
 }
 
-type CheckboxProps = {
+function Input({
+  label,
+  value,
+  onChange,
+  placeholder,
+  disabled,
+  type,
+}: {
   label: string;
-  checked: boolean;
-  onChange: (v: boolean) => void;
-};
-
-function CheckboxRow({ label, checked, onChange }: CheckboxProps) {
+  value: string;
+  onChange: (v: string) => void;
+  placeholder?: string;
+  disabled?: boolean;
+  type?: string;
+}) {
   return (
-    <label className="inline-flex items-center gap-2 cursor-pointer text-sm">
+    <label className="block">
+      <div className="mb-1 text-xs font-medium text-zinc-600">{label}</div>
       <input
-        type="checkbox"
-        className="h-4 w-4 rounded border-gray-300 text-black focus:ring-black"
-        checked={checked}
-        onChange={(e) => onChange(e.target.checked)}
+        type={type || "text"}
+        disabled={disabled}
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        placeholder={placeholder}
+        className={cx(
+          "w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none",
+          "focus:border-zinc-300 focus:ring-2 focus:ring-zinc-900/10",
+          disabled && "bg-zinc-50 text-zinc-500"
+        )}
       />
-      <span>{label}</span>
     </label>
   );
 }
 
-/* ----------------------- types ------------------------ */
-
-type PrintLanguage = "MAIN_LOCALIZED" | "MAIN_ONLY" | "LOCALIZED_ONLY";
-
-type ReceiptSettings = {
-  id?: string;
-  logoUrl?: string | null;
-  printLanguage: PrintLanguage;
-  mainLanguage: string;
-  localizedLanguage?: string | null;
-  receiptHeader?: string | null;
-  receiptFooter?: string | null;
-  invoiceTitle?: string | null;
-  showOrderNumber: boolean;
-  showCalories: boolean;
-  showSubtotal: boolean;
-  showRounding: boolean;
-  showCloserUsername: boolean;
-  showCreatorUsername: boolean;
-  showCheckNumber: boolean;
-  hideFreeModifierOptions: boolean;
-  printCustomerPhoneInPickup: boolean;
-};
-
-type CallCenterSettings = {
-  id?: string;
-  agents?: string | null;
-  acceptedPaymentModes: string[];
-  inactiveBranches?: string | null;
-  menuGroup?: string | null;
-  inactiveOrderTypes?: string | null;
-  allowDiscounts: boolean;
-  allowCoupons: boolean;
-  allowEditingOrders: boolean;
-  allowVoidingActive: boolean;
-  allowReadAllCcOrders: boolean;
-  allowReadAllDcOrders: boolean;
-  allowPriceTags: boolean;
-};
-
-type CashierSettings = {
-  id?: string;
-  presetTenderedAmounts?: string | null;
-  tenderedAmountCurrencies?: string | null;
-  predefinedTipPercentages?: string | null;
-  uploadOrdersDelayMinutes: number;
-  inactiveUsersLogoutMinutes: number;
-  returnMode: "LIMITED" | "NOT_ALLOWED" | "UNLIMITED";
-  limitedReturnPeriodMinutes?: number | null;
-  requireOrderTagsForOrders?: string | null;
-  roundingMethod?: string | null;
-  enableTips: boolean;
-  discountsRequireCustomerInfo: boolean;
-  voidRequiresCustomerInfo: boolean;
-  requireTableGuestForDineIn: boolean;
-  alwaysAskVoidReasons: boolean;
-  autoSendToKitchenAfterFullPayment: boolean;
-  autoDataSyncAtStartOfDay: boolean;
-  autoPrintProductMix: boolean;
-  autoPrintTillReports: boolean;
-  forceInventoryCountBeforeEndOfDay: boolean;
-  autoCloseKioskOrders: boolean;
-  preventSellingOutOfStock: boolean;
-  printPaymentReceiptsForActiveOrders: boolean;
-  singleTillMode: boolean;
-  requireCustomerInfoBeforeClosing: boolean;
-};
-
-type DisplaySettings = {
-  id?: string;
-  backgroundImageUrl?: string | null;
-};
-
-type KitchenSettings = {
-  id?: string;
-  sortingMethod: string;
-  showDefaultModifiersOnKds: boolean;
-};
-
-type InventorySettings = {
-  id?: string;
-  logoUrl?: string | null;
-  header?: string | null;
-  footer?: string | null;
-  restrictToAvailableQuantities: boolean;
-};
-
-/* ---------------------- defaults ---------------------- */
-
-const receiptDefaults: ReceiptSettings = {
-  printLanguage: "MAIN_LOCALIZED",
-  mainLanguage: "en",
-  localizedLanguage: "ar",
-  logoUrl: "",
-  receiptHeader: "",
-  receiptFooter: "",
-  invoiceTitle: "Simplified Tax Invoice",
-  showOrderNumber: true,
-  showCalories: false,
-  showSubtotal: true,
-  showRounding: false,
-  showCloserUsername: false,
-  showCreatorUsername: false,
-  showCheckNumber: true,
-  hideFreeModifierOptions: false,
-  printCustomerPhoneInPickup: false,
-};
-
-const callCenterDefaults: CallCenterSettings = {
-  agents: "CallCenter",
-  acceptedPaymentModes: ["CARD_ON_DELIVERY", "CASH_ON_DELIVERY"],
-  inactiveBranches: "",
-  menuGroup: "",
-  inactiveOrderTypes: "",
-  allowDiscounts: true,
-  allowCoupons: false,
-  allowEditingOrders: false,
-  allowVoidingActive: false,
-  allowReadAllCcOrders: true,
-  allowReadAllDcOrders: true,
-  allowPriceTags: false,
-};
-
-const cashierDefaults: CashierSettings = {
-  presetTenderedAmounts: "",
-  tenderedAmountCurrencies: "",
-  predefinedTipPercentages: "",
-  uploadOrdersDelayMinutes: 0,
-  inactiveUsersLogoutMinutes: 30,
-  returnMode: "LIMITED",
-  limitedReturnPeriodMinutes: 21600,
-  requireOrderTagsForOrders: "",
-  roundingMethod: "NONE",
-  enableTips: false,
-  discountsRequireCustomerInfo: false,
-  voidRequiresCustomerInfo: false,
-  requireTableGuestForDineIn: false,
-  alwaysAskVoidReasons: false,
-  autoSendToKitchenAfterFullPayment: true,
-  autoDataSyncAtStartOfDay: false,
-  autoPrintProductMix: true,
-  autoPrintTillReports: false,
-  forceInventoryCountBeforeEndOfDay: false,
-  autoCloseKioskOrders: false,
-  preventSellingOutOfStock: false,
-  printPaymentReceiptsForActiveOrders: false,
-  singleTillMode: false,
-  requireCustomerInfoBeforeClosing: false,
-};
-
-const displayDefaults: DisplaySettings = {
-  backgroundImageUrl: "",
-};
-
-const kitchenDefaults: KitchenSettings = {
-  sortingMethod: "MENU_CATEGORY",
-  showDefaultModifiersOnKds: false,
-};
-
-const inventoryDefaults: InventorySettings = {
-  logoUrl: "",
-  header: "",
-  footer: "",
-  restrictToAvailableQuantities: false,
-};
-
-/* --------------------- main page ---------------------- */
-
-type TabKey =
-  | "receipt"
-  | "callCenter"
-  | "cashier"
-  | "display"
-  | "kitchen"
-  | "payments"
-  | "sms"
-  | "inventory";
-
-const tabs: { key: TabKey; label: string }[] = [
-  { key: "receipt", label: "Receipt" },
-  { key: "callCenter", label: "Call Center" },
-  { key: "cashier", label: "Cashier App" },
-  { key: "display", label: "Display App" },
-  { key: "kitchen", label: "Kitchen" },
-  { key: "payments", label: "Payment Integrations" },
-  { key: "sms", label: "SMS Providers" },
-  { key: "inventory", label: "Inventory Transactions" },
-];
-
-export default function SettingsPage() {
-  const router = useRouter();
-  const [activeTab, setActiveTab] = useState<TabKey>("receipt");
-
+function Select({
+  label,
+  value,
+  onChange,
+  children,
+}: {
+  label: string;
+  value: string;
+  onChange: (v: string) => void;
+  children: React.ReactNode;
+}) {
   return (
-    <div className="p-6">
-      <div className="mb-4 flex items-center gap-2 text-sm text-gray-500">
-        <button
-          onClick={() => router.back()}
-          className="inline-flex items-center gap-2 rounded-xl bg-black px-4 py-2 text-sm font-medium text-white hover:bg-black/90"
-        >
-          ← Back
-        </button>
-      </div>
+    <label className="block">
+      <div className="mb-1 text-xs font-medium text-zinc-600">{label}</div>
+      <select
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-full rounded-lg border border-zinc-200 bg-white px-3 py-2 text-sm text-zinc-900 outline-none focus:border-zinc-300 focus:ring-2 focus:ring-zinc-900/10"
+      >
+        {children}
+      </select>
+    </label>
+  );
+}
 
-      <h1 className="text-2xl font-semibold mb-6">Settings</h1>
-
-      <div className="mb-4 border-b border-gray-200 flex gap-4 text-sm">
-        {tabs.map((tab) => {
-          const isActive = activeTab === tab.key;
-          return (
-            <button
-              key={tab.key}
-              onClick={() => setActiveTab(tab.key)}
-              className={`pb-2 ${
-                isActive
-                  ? "border-b-2 border-black text-black font-medium"
-                  : "text-gray-500 hover:text-black"
-              }`}
-            >
-              {tab.label}
-            </button>
-          );
-        })}
-      </div>
-
-      {activeTab === "receipt" && <ReceiptSettingsForm />}
-      {activeTab === "callCenter" && <CallCenterSettingsForm />}
-      {activeTab === "cashier" && <CashierSettingsForm />}
-      {activeTab === "display" && <DisplaySettingsForm />}
-      {activeTab === "kitchen" && <KitchenSettingsForm />}
-      {activeTab === "payments" && <PaymentIntegrationsStub />}
-      {activeTab === "sms" && <SmsProvidersStub />}
-      {activeTab === "inventory" && <InventorySettingsForm />}
+function Toggle({
+  label,
+  checked,
+  onChange,
+}: {
+  label: string;
+  checked: boolean;
+  onChange: (v: boolean) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between rounded-lg border border-zinc-200 bg-white px-3 py-2">
+      <div className="text-sm text-zinc-800">{label}</div>
+      <button
+        type="button"
+        onClick={() => onChange(!checked)}
+        className={cx(
+          "relative inline-flex h-6 w-11 items-center rounded-full transition",
+          checked ? "bg-black" : "bg-zinc-200"
+        )}
+        aria-label={label}
+      >
+        <span
+          className={cx(
+            "inline-block h-5 w-5 transform rounded-full bg-white transition",
+            checked ? "translate-x-5" : "translate-x-1"
+          )}
+        />
+      </button>
     </div>
   );
 }
 
-/* ---------------- receipt form component --------------- */
-
-const printLanguageOptions: { value: PrintLanguage; label: string }[] = [
-  { value: "MAIN_LOCALIZED", label: "Main & Localized" },
-  { value: "MAIN_ONLY", label: "Main Only" },
-  { value: "LOCALIZED_ONLY", label: "Localized Only" },
-];
-
-const languageOptions = [
-  { value: "en", label: "English" },
-  { value: "ar", label: "عربي" },
-];
-
-function ReceiptSettingsForm() {
-  const [form, setForm] = useState<ReceiptSettings>(receiptDefaults);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        setLoading(true);
-        const data = await fetchJson<ReceiptSettings>(`${API_BASE}/receipt-settings`);
-        if (!cancelled && data) {
-          setForm({
-            ...receiptDefaults,
-            ...data,
-            logoUrl: data.logoUrl || "",
-            receiptHeader: data.receiptHeader || "",
-            receiptFooter: data.receiptFooter || "",
-            invoiceTitle: data.invoiceTitle || "",
-          });
-        }
-      } catch (err: any) {
-        if (!cancelled) setError(err.message || "Failed to load settings");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  function setField<K extends keyof ReceiptSettings>(key: K, value: ReceiptSettings[K]) {
-    setForm((prev) => ({ ...prev, [key]: value }));
-  }
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setSaving(true);
-    setMessage(null);
-    setError(null);
-
-    try {
-      const { id, ...payload } = form;
-      await fetchJson(`${API_BASE}/receipt-settings`, {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      setMessage("Receipt settings saved.");
-    } catch (err: any) {
-      setError(err.message || "Failed to save settings");
-    } finally {
-      setSaving(false);
-      setTimeout(() => setMessage(null), 3000);
-    }
-  }
-
+function Drawer({
+  open,
+  title,
+  subtitle,
+  children,
+  onClose,
+}: {
+  open: boolean;
+  title: string;
+  subtitle?: string;
+  children: React.ReactNode;
+  onClose: () => void;
+}) {
   return (
-    <div className="bg-white shadow-sm rounded-lg p-6 max-w-2xl">
-      <div className="mb-4">
-        <h2 className="text-lg font-semibold">Receipt Settings</h2>
-      </div>
-
-      {loading ? (
-        <div className="flex items-center gap-2 text-gray-500">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          <span>Loading settings...</span>
-        </div>
-      ) : (
-        <form onSubmit={handleSubmit} className="space-y-5">
-          {/* Logo */}
-          <div>
-            <label className="block text-sm font-medium mb-1">Receipt Logo</label>
-            {form.logoUrl ? (
-              <div className="mb-3">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={API_BASE + form.logoUrl}
-                  alt="Logo"
-                  className="h-16 border rounded p-1 bg-white"
-                />
-                <button
-                  type="button"
-                  className="text-red-600 text-xs mt-1"
-                  onClick={() => setField("logoUrl", "")}
-                >
-                  Remove
-                </button>
+    <div className={cx("fixed inset-0 z-50", open ? "" : "pointer-events-none")}>
+      <div
+        onClick={onClose}
+        className={cx(
+          "absolute inset-0 bg-black/30 transition-opacity",
+          open ? "opacity-100" : "opacity-0"
+        )}
+      />
+      <div
+        className={cx(
+          "absolute right-0 top-0 h-full w-full max-w-3xl bg-white shadow-2xl transition-transform",
+          open ? "translate-x-0" : "translate-x-full"
+        )}
+      >
+        <div className="flex h-full flex-col">
+          <div className="border-b border-zinc-200 p-5">
+            <div className="flex items-start justify-between gap-4">
+              <div>
+                <div className="text-lg font-semibold text-zinc-900">{title}</div>
+                {subtitle ? (
+                  <div className="mt-1 text-sm text-zinc-600">{subtitle}</div>
+                ) : null}
               </div>
-            ) : null}
-            <input
-              type="file"
-              accept="image/*"
-              onChange={async (e) => {
-                const file = e.target.files?.[0];
-                if (!file) return;
-                try {
-                  setSaving(true);
-                  const url = await uploadSettingImage(file);
-                  setField("logoUrl", url);
-                } catch (err) {
-                  alert("Upload failed");
-                } finally {
-                  setSaving(false);
-                }
-              }}
-              className="mt-1 text-sm"
-            />
-          </div>
-
-          {/* languages */}
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium mb-1">Print Language</label>
-              <select
-                value={form.printLanguage}
-                onChange={(e) =>
-                  setField("printLanguage", e.target.value as PrintLanguage)
-                }
-                className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-black focus:outline-none"
-              >
-                {printLanguageOptions.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">Main Language</label>
-              <select
-                value={form.mainLanguage}
-                onChange={(e) => setField("mainLanguage", e.target.value)}
-                className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-black focus:outline-none"
-              >
-                {languageOptions.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">Localized Language</label>
-              <select
-                value={form.localizedLanguage || ""}
-                onChange={(e) =>
-                  setField("localizedLanguage", e.target.value || undefined)
-                }
-                className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-black focus:outline-none"
-              >
-                <option value="">None</option>
-                {languageOptions.map((opt) => (
-                  <option key={opt.value} value={opt.value}>
-                    {opt.label}
-                  </option>
-                ))}
-              </select>
+              <Button variant="ghost" onClick={onClose}>
+                Close
+              </Button>
             </div>
           </div>
-
-          {/* header/footer/title */}
-          <div>
-            <label className="block text-sm font-medium mb-1">Receipt Header</label>
-            <textarea
-              rows={3}
-              value={form.receiptHeader || ""}
-              onChange={(e) => setField("receiptHeader", e.target.value)}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-black focus:outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-1">Receipt Footer</label>
-            <textarea
-              rows={3}
-              value={form.receiptFooter || ""}
-              onChange={(e) => setField("receiptFooter", e.target.value)}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-black focus:outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-1">Invoice Title</label>
-            <input
-              type="text"
-              value={form.invoiceTitle || ""}
-              onChange={(e) => setField("invoiceTitle", e.target.value)}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-black focus:outline-none"
-            />
-          </div>
-
-          {/* checkboxes */}
-          <div className="border-t border-gray-200 pt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
-            <CheckboxRow
-              label="Show Order Number"
-              checked={form.showOrderNumber}
-              onChange={(v) => setField("showOrderNumber", v)}
-            />
-            <CheckboxRow
-              label="Show Calories"
-              checked={form.showCalories}
-              onChange={(v) => setField("showCalories", v)}
-            />
-            <CheckboxRow
-              label="Show Subtotal"
-              checked={form.showSubtotal}
-              onChange={(v) => setField("showSubtotal", v)}
-            />
-            <CheckboxRow
-              label="Show Rounding"
-              checked={form.showRounding}
-              onChange={(v) => setField("showRounding", v)}
-            />
-            <CheckboxRow
-              label="Show Closer Username"
-              checked={form.showCloserUsername}
-              onChange={(v) => setField("showCloserUsername", v)}
-            />
-            <CheckboxRow
-              label="Show Creator Username"
-              checked={form.showCreatorUsername}
-              onChange={(v) => setField("showCreatorUsername", v)}
-            />
-            <CheckboxRow
-              label="Show Check Number"
-              checked={form.showCheckNumber}
-              onChange={(v) => setField("showCheckNumber", v)}
-            />
-            <CheckboxRow
-              label="Hide Free Modifier Options"
-              checked={form.hideFreeModifierOptions}
-              onChange={(v) => setField("hideFreeModifierOptions", v)}
-            />
-            <CheckboxRow
-              label="Print customer phone number in pickup orders"
-              checked={form.printCustomerPhoneInPickup}
-              onChange={(v) => setField("printCustomerPhoneInPickup", v)}
-            />
-          </div>
-
-          {message && (
-            <div className="text-sm text-green-600 bg-green-50 border border-green-200 rounded px-3 py-2">
-              {message}
-            </div>
-          )}
-          {error && (
-            <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">
-              {error}
-            </div>
-          )}
-
-          <div className="pt-2">
-            <Button type="submit" disabled={saving}>
-              {saving ? (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin mr-1" />
-                  Saving...
-                </>
-              ) : (
-                "Save Changes"
-              )}
-            </Button>
-          </div>
-        </form>
-      )}
+          <div className="flex-1 overflow-auto p-5">{children}</div>
+        </div>
+      </div>
     </div>
   );
 }
 
-/* ----------------- Call Center form ------------------- */
-
-const PAYMENT_MODE_OPTIONS = [
-  { value: "CARD_ON_DELIVERY", label: "Card on Delivery" },
-  { value: "CASH_ON_DELIVERY", label: "Cash on Delivery" },
-  { value: "ONLINE_PAYMENT", label: "Online Payment" },
-];
-
-function CallCenterSettingsForm() {
-  const [form, setForm] = useState<CallCenterSettings>(callCenterDefaults);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        setLoading(true);
-        const data = await fetchJson<CallCenterSettings>(`${API_BASE}/callcenter-settings`);
-        if (!cancelled && data) {
-          setForm({
-            ...callCenterDefaults,
-            ...data,
-            acceptedPaymentModes: data.acceptedPaymentModes || [],
-          });
-        }
-      } catch (err: any) {
-        if (!cancelled) setError(err.message || "Failed to load settings");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  function setField<K extends keyof CallCenterSettings>(key: K, value: CallCenterSettings[K]) {
-    setForm((prev) => ({ ...prev, [key]: value }));
-  }
-
-  function togglePaymentMode(value: string) {
-    setForm((prev) => {
-      const exists = prev.acceptedPaymentModes.includes(value);
-      return {
-        ...prev,
-        acceptedPaymentModes: exists
-          ? prev.acceptedPaymentModes.filter((m) => m !== value)
-          : [...prev.acceptedPaymentModes, value],
-      };
-    });
-  }
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setSaving(true);
-    setMessage(null);
-    setError(null);
-
-    try {
-      const { id, ...payload } = form;
-      await fetchJson(`${API_BASE}/callcenter-settings`, {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      setMessage("Call Center settings saved.");
-    } catch (err: any) {
-      setError(err.message || "Failed to save settings");
-    } finally {
-      setSaving(false);
-      setTimeout(() => setMessage(null), 3000);
-    }
-  }
-
+function SectionTitle({ title, desc }: { title: string; desc?: string }) {
   return (
-    <div className="bg-white shadow-sm rounded-lg p-6 max-w-2xl">
-      <h2 className="text-lg font-semibold mb-4">Call Center Ordering Settings</h2>
-
-      {loading ? (
-        <div className="flex items-center gap-2 text-gray-500">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          <span>Loading settings...</span>
-        </div>
-      ) : (
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium mb-1">Agents</label>
-            <input
-              type="text"
-              value={form.agents || ""}
-              onChange={(e) => setField("agents", e.target.value)}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-black focus:outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-1">Accepted Payment Modes</label>
-            <div className="flex flex-wrap gap-2">
-              {PAYMENT_MODE_OPTIONS.map((opt) => {
-                const active = form.acceptedPaymentModes.includes(opt.value);
-                return (
-                  <Button
-                    key={opt.value}
-                    type="button"
-                    variant={active ? "pill-active" : "pill"}
-                    onClick={() => togglePaymentMode(opt.value)}
-                  >
-                    {opt.label}
-                  </Button>
-                );
-              })}
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-1">Inactive Branches</label>
-            <input
-              type="text"
-              placeholder="Comma separated branch codes / IDs"
-              value={form.inactiveBranches || ""}
-              onChange={(e) => setField("inactiveBranches", e.target.value)}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-black focus:outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-1">Menu Group</label>
-            <input
-              type="text"
-              placeholder="Callcenter / Delivery Menu"
-              value={form.menuGroup || ""}
-              onChange={(e) => setField("menuGroup", e.target.value)}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-black focus:outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-1">Inactive Order Types</label>
-            <input
-              type="text"
-              placeholder="Comma separated order types"
-              value={form.inactiveOrderTypes || ""}
-              onChange={(e) => setField("inactiveOrderTypes", e.target.value)}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-black focus:outline-none"
-            />
-          </div>
-
-          <div className="border-t border-gray-200 pt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
-            <CheckboxRow
-              label="Allow Discounts"
-              checked={form.allowDiscounts}
-              onChange={(v) => setField("allowDiscounts", v)}
-            />
-            <CheckboxRow
-              label="Allow Coupons"
-              checked={form.allowCoupons}
-              onChange={(v) => setField("allowCoupons", v)}
-            />
-            <CheckboxRow
-              label="Allow Editing Orders"
-              checked={form.allowEditingOrders}
-              onChange={(v) => setField("allowEditingOrders", v)}
-            />
-            <CheckboxRow
-              label="Allow Voiding Active Orders"
-              checked={form.allowVoidingActive}
-              onChange={(v) => setField("allowVoidingActive", v)}
-            />
-            <CheckboxRow
-              label="Allow agents to read all CC Orders"
-              checked={form.allowReadAllCcOrders}
-              onChange={(v) => setField("allowReadAllCcOrders", v)}
-            />
-            <CheckboxRow
-              label="Allow agents to read all DC Orders"
-              checked={form.allowReadAllDcOrders}
-              onChange={(v) => setField("allowReadAllDcOrders", v)}
-            />
-            <CheckboxRow
-              label="Allow Price Tags"
-              checked={form.allowPriceTags}
-              onChange={(v) => setField("allowPriceTags", v)}
-            />
-          </div>
-
-          {message && (
-            <div className="text-sm text-green-600 bg-green-50 border border-green-200 rounded px-3 py-2">
-              {message}
-            </div>
-          )}
-          {error && (
-            <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">
-              {error}
-            </div>
-          )}
-
-          <div className="pt-2">
-            <Button type="submit" disabled={saving}>
-              {saving ? (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin mr-1" />
-                  Saving...
-                </>
-              ) : (
-                "Save Changes"
-              )}
-            </Button>
-          </div>
-        </form>
-      )}
+    <div className="mb-3">
+      <div className="text-sm font-semibold text-zinc-900">{title}</div>
+      {desc ? <div className="mt-0.5 text-xs text-zinc-500">{desc}</div> : null}
     </div>
   );
 }
 
-/* ----------------- Cashier app form ------------------- */
+/* ----------------------------- Logo upload ----------------------------- */
 
-function CashierSettingsForm() {
-  const [form, setForm] = useState<CashierSettings>(cashierDefaults);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+function LogoUploader({
+  value,
+  onUploaded,
+}: {
+  value?: string | null;
+  onUploaded: (v: { logoMediaId: string; logoUrl: string }) => void;
+}) {
+  const [uploading, setUploading] = useState(false);
+  const [err, setErr] = useState("");
 
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        setLoading(true);
-        const data = await fetchJson<CashierSettings>(`${API_BASE}/cashier-settings`);
-        if (!cancelled && data) {
-          setForm({ ...cashierDefaults, ...data });
-        }
-      } catch (err: any) {
-        if (!cancelled) setError(err.message || "Failed to load settings");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  function setField<K extends keyof CashierSettings>(key: K, value: CashierSettings[K]) {
-    setForm((prev) => ({ ...prev, [key]: value }));
-  }
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setSaving(true);
-    setMessage(null);
-    setError(null);
-
+  async function handleUpload(file: File) {
     try {
-      const { id, ...payload } = form;
-      await fetchJson(`${API_BASE}/cashier-settings`, {
+      setErr("");
+      setUploading(true);
+
+      const token = getToken();
+      const form = new FormData();
+      form.append("file", file);
+
+      const res = await fetch(`${API}/organizations/media/logo`, {
         method: "POST",
-        body: JSON.stringify(payload),
+        headers: {
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: form,
+        credentials: "include",
       });
-      setMessage("Cashier App settings saved.");
-    } catch (err: any) {
-      setError(err.message || "Failed to save settings");
+
+      if (res.status === 401) {
+        authStore.expire("Session expired. Please log in again.");
+        throw new Error("Unauthorized (401). Please login again.");
+      }
+
+      const text = await res.text().catch(() => "");
+      let json: any = null;
+      try {
+        json = text ? JSON.parse(text) : null;
+      } catch {}
+
+      if (!res.ok) {
+        throw new Error(
+          json?.message || json?.error || text || `HTTP ${res.status}`
+        );
+      }
+
+      onUploaded({ logoMediaId: json.mediaId, logoUrl: json.url });
+    } catch (e: any) {
+      setErr(e?.message || "Upload failed");
     } finally {
-      setSaving(false);
-      setTimeout(() => setMessage(null), 3000);
+      setUploading(false);
     }
   }
+
+  const previewSrc =
+    value && value.trim()
+      ? value.startsWith("http")
+        ? value
+        : `${API}${value}` // ✅ fixes /uploads/... not loading from Next.js domain
+      : "";
 
   return (
-    <div className="bg-white shadow-sm rounded-lg p-6 max-w-2xl">
-      <h2 className="text-lg font-semibold mb-4">Cashier App Settings</h2>
+    <div className="flex items-center gap-4">
+      <div className="h-20 w-20 overflow-hidden rounded-xl border border-zinc-200 bg-zinc-50 flex items-center justify-center">
+        {previewSrc ? (
+          <img
+            src={previewSrc}
+            alt="Logo"
+            className="h-full w-full object-contain"
+            onError={(e) => {
+              (e.currentTarget as HTMLImageElement).style.display = "none";
+            }}
+          />
+        ) : (
+          <span className="text-xs text-zinc-400">LOGO</span>
+        )}
+      </div>
 
-      {loading ? (
-        <div className="flex items-center gap-2 text-gray-500">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          <span>Loading settings...</span>
-        </div>
-      ) : (
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium mb-1">Preset Tendered Amounts</label>
-            <input
-              type="text"
-              placeholder="50,100,200"
-              value={form.presetTenderedAmounts || ""}
-              onChange={(e) => setField("presetTenderedAmounts", e.target.value)}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-black focus:outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-1">
-              Tendered Amount Currencies
-            </label>
-            <input
-              type="text"
-              placeholder="SAR,USD"
-              value={form.tenderedAmountCurrencies || ""}
-              onChange={(e) => setField("tenderedAmountCurrencies", e.target.value)}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-black focus:outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-1">
-              Predefined Tips Percentages
-            </label>
-            <input
-              type="text"
-              placeholder="5,10,15"
-              value={form.predefinedTipPercentages || ""}
-              onChange={(e) => setField("predefinedTipPercentages", e.target.value)}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-black focus:outline-none"
-            />
-          </div>
-
-          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-            <div>
-              <label className="block text-sm font-medium mb-1">
-                Upload Orders Delay (Minutes)
-              </label>
-              <input
-                type="number"
-                value={form.uploadOrdersDelayMinutes}
-                onChange={(e) =>
-                  setField("uploadOrdersDelayMinutes", Number(e.target.value || 0))
-                }
-                className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-black focus:outline-none"
-              />
-            </div>
-            <div>
-              <label className="block text-sm font-medium mb-1">
-                Inactive Users Logout (Minutes)
-              </label>
-              <input
-                type="number"
-                value={form.inactiveUsersLogoutMinutes}
-                onChange={(e) =>
-                  setField("inactiveUsersLogoutMinutes", Number(e.target.value || 0))
-                }
-                className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-black focus:outline-none"
-              />
-            </div>
-          </div>
-
-          {/* Return period */}
-          <div>
-            <label className="block text-sm font-medium mb-1">Return Period</label>
-            <div className="space-y-2 text-sm">
-              <label className="flex items-center gap-2">
-                <input
-                  type="radio"
-                  name="returnMode"
-                  value="LIMITED"
-                  checked={form.returnMode === "LIMITED"}
-                  onChange={() => setField("returnMode", "LIMITED")}
-                />
-                <span>Limited return period (minutes)</span>
-              </label>
-              {form.returnMode === "LIMITED" && (
-                <input
-                  type="number"
-                  value={form.limitedReturnPeriodMinutes ?? 0}
-                  onChange={(e) =>
-                    setField(
-                      "limitedReturnPeriodMinutes",
-                      Number(e.target.value || 0)
-                    )
-                  }
-                  className="mt-1 w-full rounded border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-black focus:outline-none"
-                />
-              )}
-
-              <label className="flex items-center gap-2">
-                <input
-                  type="radio"
-                  name="returnMode"
-                  value="NOT_ALLOWED"
-                  checked={form.returnMode === "NOT_ALLOWED"}
-                  onChange={() => setField("returnMode", "NOT_ALLOWED")}
-                />
-                <span>Return not allowed</span>
-              </label>
-
-              <label className="flex items-center gap-2">
-                <input
-                  type="radio"
-                  name="returnMode"
-                  value="UNLIMITED"
-                  checked={form.returnMode === "UNLIMITED"}
-                  onChange={() => setField("returnMode", "UNLIMITED")}
-                />
-                <span>Unlimited return period</span>
-              </label>
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-1">
-              Require Order Tags for Orders
-            </label>
-            <input
-              type="text"
-              value={form.requireOrderTagsForOrders || ""}
-              onChange={(e) => setField("requireOrderTagsForOrders", e.target.value)}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-black focus:outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-1">Rounding Method</label>
-            <select
-              value={form.roundingMethod || "NONE"}
-              onChange={(e) => setField("roundingMethod", e.target.value)}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-black focus:outline-none"
-            >
-              <option value="NONE">None</option>
-              <option value="NEAREST_0_5">Nearest 0.5</option>
-              <option value="NEAREST_1">Nearest 1</option>
-            </select>
-          </div>
-
-          <div className="border-t border-gray-200 pt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
-            <CheckboxRow
-              label="Enable Tips"
-              checked={form.enableTips}
-              onChange={(v) => setField("enableTips", v)}
-            />
-            <CheckboxRow
-              label="Discounts & Coupons Require Customer Info"
-              checked={form.discountsRequireCustomerInfo}
-              onChange={(v) => setField("discountsRequireCustomerInfo", v)}
-            />
-            <CheckboxRow
-              label="Void Requires Customer Info"
-              checked={form.voidRequiresCustomerInfo}
-              onChange={(v) => setField("voidRequiresCustomerInfo", v)}
-            />
-            <CheckboxRow
-              label="Require Table and Guest count for Dine-in"
-              checked={form.requireTableGuestForDineIn}
-              onChange={(v) => setField("requireTableGuestForDineIn", v)}
-            />
-            <CheckboxRow
-              label="Always Ask For Void Reasons"
-              checked={form.alwaysAskVoidReasons}
-              onChange={(v) => setField("alwaysAskVoidReasons", v)}
-            />
-            <CheckboxRow
-              label="Auto Send To Kitchen After Full Payment"
-              checked={form.autoSendToKitchenAfterFullPayment}
-              onChange={(v) => setField("autoSendToKitchenAfterFullPayment", v)}
-            />
-            <CheckboxRow
-              label="Auto Data Sync At Start Of Day"
-              checked={form.autoDataSyncAtStartOfDay}
-              onChange={(v) => setField("autoDataSyncAtStartOfDay", v)}
-            />
-            <CheckboxRow
-              label="Auto Print Product Mix"
-              checked={form.autoPrintProductMix}
-              onChange={(v) => setField("autoPrintProductMix", v)}
-            />
-            <CheckboxRow
-              label="Auto Print Till's reports"
-              checked={form.autoPrintTillReports}
-              onChange={(v) => setField("autoPrintTillReports", v)}
-            />
-            <CheckboxRow
-              label="Force Inventory count before end of day"
-              checked={form.forceInventoryCountBeforeEndOfDay}
-              onChange={(v) => setField("forceInventoryCountBeforeEndOfDay", v)}
-            />
-            <CheckboxRow
-              label="Auto Close Kiosk Orders"
-              checked={form.autoCloseKioskOrders}
-              onChange={(v) => setField("autoCloseKioskOrders", v)}
-            />
-            <CheckboxRow
-              label="Prevent selling out-of-stock products"
-              checked={form.preventSellingOutOfStock}
-              onChange={(v) => setField("preventSellingOutOfStock", v)}
-            />
-            <CheckboxRow
-              label="Print Payment Receipts for Active Orders"
-              checked={form.printPaymentReceiptsForActiveOrders}
-              onChange={(v) =>
-                setField("printPaymentReceiptsForActiveOrders", v)
-              }
-            />
-            <CheckboxRow
-              label="Single Till Mode"
-              checked={form.singleTillMode}
-              onChange={(v) => setField("singleTillMode", v)}
-            />
-            <CheckboxRow
-              label="Require customer info before closing any order"
-              checked={form.requireCustomerInfoBeforeClosing}
-              onChange={(v) =>
-                setField("requireCustomerInfoBeforeClosing", v)
-              }
-            />
-          </div>
-
-          {message && (
-            <div className="text-sm text-green-600 bg-green-50 border border-green-200 rounded px-3 py-2">
-              {message}
-            </div>
-          )}
-          {error && (
-            <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">
-              {error}
-            </div>
-          )}
-
-          <div className="pt-2">
-            <Button type="submit" disabled={saving}>
-              {saving ? (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin mr-1" />
-                  Saving...
-                </>
-              ) : (
-                "Save Changes"
-              )}
-            </Button>
-          </div>
-        </form>
-      )}
-    </div>
-  );
-}
-
-/* ----------------- Display app form ------------------- */
-
-function DisplaySettingsForm() {
-  const [form, setForm] = useState<DisplaySettings>(displayDefaults);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        setLoading(true);
-        const data = await fetchJson<DisplaySettings>(`${API_BASE}/display-settings`);
-        if (!cancelled && data) {
-          setForm({ ...displayDefaults, ...data });
-        }
-      } catch (err: any) {
-        if (!cancelled) setError(err.message || "Failed to load settings");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  async function handleUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
-    try {
-      setSaving(true);
-      const url = await uploadSettingImage(file);
-      setForm((prev) => ({ ...prev, backgroundImageUrl: url }));
-    } catch {
-      alert("Upload failed");
-    } finally {
-      setSaving(false);
-    }
-  }
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setSaving(true);
-    setMessage(null);
-    setError(null);
-    try {
-      const { id, ...payload } = form;
-      await fetchJson(`${API_BASE}/display-settings`, {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      setMessage("Display App settings saved.");
-    } catch (err: any) {
-      setError(err.message || "Failed to save settings");
-    } finally {
-      setSaving(false);
-      setTimeout(() => setMessage(null), 3000);
-    }
-  }
-
-  return (
-    <div className="bg-white shadow-sm rounded-lg p-6 max-w-xl">
-      <h2 className="text-lg font-semibold mb-4">Display App Settings</h2>
-
-      {loading ? (
-        <div className="flex items-center gap-2 text-gray-500">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          <span>Loading settings...</span>
-        </div>
-      ) : (
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium mb-1">Upload Background</label>
-            {form.backgroundImageUrl ? (
-              <div className="mb-3">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={API_BASE + form.backgroundImageUrl}
-                  alt="Background"
-                  className="h-24 border rounded bg-white object-cover"
-                />
-                <button
-                  type="button"
-                  className="text-red-600 text-xs mt-1"
-                  onClick={() =>
-                    setForm((p) => ({ ...p, backgroundImageUrl: "" }))
-                  }
-                >
-                  Remove
-                </button>
-              </div>
-            ) : null}
-            <input
-              type="file"
-              accept="image/*"
-              onChange={handleUpload}
-              className="mt-1 text-sm"
-            />
-          </div>
-
-          {message && (
-            <div className="text-sm text-green-600 bg-green-50 border border-green-200 rounded px-3 py-2">
-              {message}
-            </div>
-          )}
-          {error && (
-            <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">
-              {error}
-            </div>
-          )}
-
-          <div className="pt-2">
-            <Button type="submit" disabled={saving}>
-              {saving ? (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin mr-1" />
-                  Saving...
-                </>
-              ) : (
-                "Save Changes"
-              )}
-            </Button>
-          </div>
-        </form>
-      )}
-    </div>
-  );
-}
-
-/* ------------------- Kitchen form --------------------- */
-
-function KitchenSettingsForm() {
-  const [form, setForm] = useState<KitchenSettings>(kitchenDefaults);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        setLoading(true);
-        const data = await fetchJson<KitchenSettings>(`${API_BASE}/kitchen-settings`);
-        if (!cancelled && data) {
-          setForm({ ...kitchenDefaults, ...data });
-        }
-      } catch (err: any) {
-        if (!cancelled) setError(err.message || "Failed to load settings");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setSaving(true);
-    setMessage(null);
-    setError(null);
-    try {
-      const { id, ...payload } = form;
-      await fetchJson(`${API_BASE}/kitchen-settings`, {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      setMessage("Kitchen settings saved.");
-    } catch (err: any) {
-      setError(err.message || "Failed to save settings");
-    } finally {
-      setSaving(false);
-      setTimeout(() => setMessage(null), 3000);
-    }
-  }
-
-  return (
-    <div className="bg-white shadow-sm rounded-lg p-6 max-w-xl">
-      <h2 className="text-lg font-semibold mb-4">Kitchen Settings</h2>
-
-      {loading ? (
-        <div className="flex items-center gap-2 text-gray-500">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          <span>Loading settings...</span>
-        </div>
-      ) : (
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium mb-1">Kitchen Sorting Method</label>
-            <select
-              value={form.sortingMethod}
-              onChange={(e) =>
-                setForm((prev) => ({ ...prev, sortingMethod: e.target.value }))
-              }
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-black focus:outline-none"
-            >
-              <option value="MENU_CATEGORY">Based on menu categories sorting</option>
-              <option value="ORDER_TIME">Based on order time</option>
-            </select>
-          </div>
-
-          <CheckboxRow
-            label="Enable printing/showing default modifiers on kitchen receipt and kitchen display"
-            checked={form.showDefaultModifiersOnKds}
-            onChange={(v) =>
-              setForm((prev) => ({ ...prev, showDefaultModifiersOnKds: v }))
+      <div className="space-y-1">
+        <label className="inline-flex cursor-pointer">
+          <input
+            type="file"
+            accept="image/*"
+            hidden
+            onChange={(e) =>
+              e.target.files && e.target.files[0] && handleUpload(e.target.files[0])
             }
           />
+          <span className="inline-flex items-center rounded-lg bg-black px-3 py-2 text-sm font-medium text-white hover:bg-zinc-900">
+            {uploading ? "Uploading…" : "Upload Logo"}
+          </span>
+        </label>
 
-          {message && (
-            <div className="text-sm text-green-600 bg-green-50 border border-green-200 rounded px-3 py-2">
-              {message}
-            </div>
-          )}
-          {error && (
-            <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">
-              {error}
-            </div>
-          )}
-
-          <div className="pt-2">
-            <Button type="submit" disabled={saving}>
-              {saving ? (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin mr-1" />
-                  Saving...
-                </>
-              ) : (
-                "Save Changes"
-              )}
-            </Button>
-          </div>
-        </form>
-      )}
-    </div>
-  );
-}
-
-/* --------------- Payment + SMS stubs ------------------ */
-
-function PaymentIntegrationsStub() {
-  return (
-    <div className="bg-white shadow-sm rounded-lg p-6 max-w-xl">
-      <h2 className="text-lg font-semibold mb-4">
-        Payment Integrations Settings
-      </h2>
-
-      <div className="flex items-center justify-between border rounded-lg px-4 py-3">
-        <div className="flex items-center gap-3">
-          <div className="h-10 w-10 rounded bg-purple-50 flex items-center justify-center text-xs font-bold">
-            STC
-          </div>
-          <div className="text-sm font-medium">STCPay</div>
-        </div>
-        <Button type="button" variant="primary">
-          Settings
-        </Button>
+        {err ? (
+          <div className="text-xs text-rose-600">{err}</div>
+        ) : (
+          <div className="text-xs text-zinc-500">PNG/JPG up to 5MB.</div>
+        )}
       </div>
     </div>
   );
 }
 
-function SmsProvidersStub() {
-  return (
-    <div className="bg-white shadow-sm rounded-lg p-6 max-w-xl">
-      <h2 className="text-lg font-semibold mb-4">SMS Providers Settings</h2>
+/* ----------------------------- page ----------------------------- */
 
-      <div className="border rounded-lg px-4 py-3 space-y-3">
-        <div className="flex items-center justify-between">
-          <div className="flex items-center gap-3">
-            <div className="h-10 w-10 rounded bg-yellow-100 flex items-center justify-center text-lg font-bold">
-              !
-            </div>
-            <div className="text-sm font-medium">Msegat</div>
-          </div>
-          <Button type="button" variant="primary">
-            Settings
-          </Button>
-        </div>
-        <p className="text-xs text-gray-500">
-          To activate, please sign up on Msegat.com first. If you already have an
-          account, please link your API key by clicking on &quot;Settings&quot;.
-        </p>
-      </div>
-    </div>
-  );
-}
+type TabKey = "org" | "brand";
 
-/* ---------------- Inventory settings ------------------ */
+export default function GeneralSettingsPage() {
+  const router = useRouter();
 
-function InventorySettingsForm() {
-  const [form, setForm] = useState<InventorySettings>(inventoryDefaults);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [message, setMessage] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [tab, setTab] = useState<TabKey>("org");
+
+  const [loading, setLoading] = useState(false);
+  const [err, setErr] = useState<string>("");
+
+  const [orgs, setOrgs] = useState<Organization[]>([]);
+  const [brands, setBrands] = useState<Brand[]>([]);
+
+  const [q, setQ] = useState("");
+
+  const [orgDrawer, setOrgDrawer] = useState<{ open: boolean; item?: Organization }>({
+    open: false,
+  });
+  const [brandDrawer, setBrandDrawer] = useState<{ open: boolean; item?: Brand }>({
+    open: false,
+  });
+
+  // ✅ orgDraft extended with ERP fields + logo
+  const [orgDraft, setOrgDraft] = useState<Organization>({
+    id: "",
+    code: "",
+    name: "",
+    isActive: true,
+    currency: "SAR",
+    country: "Saudi Arabia",
+  });
+
+  const [brandDraft, setBrandDraft] = useState<{
+    id?: string;
+    organizationId: string;
+    code: string;
+    name: string;
+    isActive: boolean;
+  }>({
+    organizationId: "",
+    code: "",
+    name: "",
+    isActive: true,
+  });
 
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        setLoading(true);
-        const data = await fetchJson<InventorySettings>(`${API_BASE}/inventory-settings`);
-        if (!cancelled && data) {
-          setForm({ ...inventoryDefaults, ...data });
-        }
-      } catch (err: any) {
-        if (!cancelled) setError(err.message || "Failed to load settings");
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    loadAll();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  function setField<K extends keyof InventorySettings>(
-    key: K,
-    value: InventorySettings[K]
-  ) {
-    setForm((prev) => ({ ...prev, [key]: value }));
-  }
-
-  async function handleLogoUpload(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0];
-    if (!file) return;
+  async function loadAll() {
     try {
-      setSaving(true);
-      const url = await uploadSettingImage(file);
-      setField("logoUrl", url);
-    } catch {
-      alert("Upload failed");
+      setErr("");
+      setLoading(true);
+
+      const [o, b] = await Promise.all([
+        api<Organization[]>("/organizations"),
+        api<Brand[]>("/brands"),
+      ]);
+
+      setOrgs(o);
+      setBrands(b);
+    } catch (e: any) {
+      setErr(e?.message || "Failed to load settings");
     } finally {
-      setSaving(false);
+      setLoading(false);
     }
   }
 
-  async function handleSubmit(e: React.FormEvent) {
-    e.preventDefault();
-    setSaving(true);
-    setMessage(null);
-    setError(null);
+  const orgCount = orgs.length;
+  const brandCount = brands.length;
+
+  const filteredOrgs = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    if (!s) return orgs;
+    return orgs.filter(
+      (x) =>
+        (x.name || "").toLowerCase().includes(s) ||
+        (x.code || "").toLowerCase().includes(s)
+    );
+  }, [orgs, q]);
+
+  const filteredBrands = useMemo(() => {
+    const s = q.trim().toLowerCase();
+    if (!s) return brands;
+    return brands.filter((x) => {
+      const orgName = (x.organization?.name || "").toLowerCase();
+      return (
+        x.name.toLowerCase().includes(s) ||
+        x.code.toLowerCase().includes(s) ||
+        orgName.includes(s)
+      );
+    });
+  }, [brands, q]);
+
+  function openNewOrg() {
+    setOrgDraft({
+      id: "",
+      code: "",
+      name: "",
+      isActive: true,
+      currency: "SAR",
+      country: "Saudi Arabia",
+      color: "#000000",
+      emailDomain: "",
+    });
+    setOrgDrawer({ open: true, item: undefined });
+  }
+
+  function openEditOrg(item: Organization) {
+    setOrgDraft({
+      ...item,
+      currency: item.currency || "SAR",
+      country: item.country || "Saudi Arabia",
+      color: item.color || "#000000",
+    });
+    setOrgDrawer({ open: true, item });
+  }
+
+  function openNewBrand() {
+    setBrandDraft({
+      organizationId: orgs[0]?.id || "",
+      code: "",
+      name: "",
+      isActive: true,
+    });
+    setBrandDrawer({ open: true, item: undefined });
+  }
+
+  function openEditBrand(item: Brand) {
+    setBrandDraft({
+      id: item.id,
+      organizationId: item.organizationId,
+      code: item.code || "",
+      name: item.name || "",
+      isActive: !!item.isActive,
+    });
+    setBrandDrawer({ open: true, item });
+  }
+
+  async function saveOrg() {
     try {
-      const { id, ...payload } = form;
-      await fetchJson(`${API_BASE}/inventory-settings`, {
-        method: "POST",
-        body: JSON.stringify(payload),
-      });
-      setMessage("Inventory Transactions settings saved.");
-    } catch (err: any) {
-      setError(err.message || "Failed to save settings");
-    } finally {
-      setSaving(false);
-      setTimeout(() => setMessage(null), 3000);
+      setErr("");
+      setLoading(true);
+
+      const payload: any = { ...orgDraft };
+      if (!payload.id) delete payload.id;
+
+      await api("/organizations", payload);
+      setOrgDrawer({ open: false, item: undefined });
+      await loadAll();
+    } catch (e: any) {
+      setErr(e?.message || "Failed to save organization");
+      setLoading(false);
+    }
+  }
+
+  async function saveBrand() {
+    try {
+      setErr("");
+      setLoading(true);
+
+      await api("/brands", brandDraft);
+      setBrandDrawer({ open: false, item: undefined });
+      await loadAll();
+    } catch (e: any) {
+      setErr(e?.message || "Failed to save brand");
+      setLoading(false);
     }
   }
 
   return (
-    <div className="bg-white shadow-sm rounded-lg p-6 max-w-xl">
-      <h2 className="text-lg font-semibold mb-4">Inventory Transactions</h2>
-
-      {loading ? (
-        <div className="flex items-center gap-2 text-gray-500">
-          <Loader2 className="h-4 w-4 animate-spin" />
-          <span>Loading settings...</span>
-        </div>
-      ) : (
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="block text-sm font-medium mb-1">Upload Logo</label>
-            {form.logoUrl ? (
-              <div className="mb-3">
-                {/* eslint-disable-next-line @next/next/no-img-element */}
-                <img
-                  src={API_BASE + form.logoUrl}
-                  alt="Inventory logo"
-                  className="h-16 border rounded bg-white"
-                />
-                <button
-                  type="button"
-                  className="text-red-600 text-xs mt-1"
-                  onClick={() => setField("logoUrl", "")}
-                >
-                  Remove
-                </button>
-              </div>
-            ) : null}
-            <input
-              type="file"
-              accept="image/*"
-              onChange={handleLogoUpload}
-              className="mt-1 text-sm"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-1">Header</label>
-            <textarea
-              rows={3}
-              value={form.header || ""}
-              onChange={(e) => setField("header", e.target.value)}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-black focus:outline-none"
-            />
-          </div>
-
-          <div>
-            <label className="block text-sm font-medium mb-1">Footer</label>
-            <textarea
-              rows={3}
-              value={form.footer || ""}
-              onChange={(e) => setField("footer", e.target.value)}
-              className="w-full rounded border border-gray-300 px-3 py-2 text-sm focus:ring-2 focus:ring-black focus:outline-none"
-            />
-          </div>
-
-          <CheckboxRow
-            label="Restrict inventory transactions to available quantities (Prevent Negative Stock)"
-            checked={form.restrictToAvailableQuantities}
-            onChange={(v) => setField("restrictToAvailableQuantities", v)}
-          />
-
-          {message && (
-            <div className="text-sm text-green-600 bg-green-50 border border-green-200 rounded px-3 py-2">
-              {message}
+    <div className="min-h-[calc(100vh-64px)] bg-zinc-50">
+      <div className="mx-auto max-w-6xl px-6 py-6">
+        {/* Top bar */}
+        <div className="flex flex-col gap-3">
+          <div className="flex items-center justify-between">
+            <div className="text-xs text-zinc-500">
+              General <span className="mx-1">/</span> Settings
             </div>
-          )}
-          {error && (
-            <div className="text-sm text-red-600 bg-red-50 border border-red-200 rounded px-3 py-2">
-              {error}
-            </div>
-          )}
 
-          <div className="pt-2">
-            <Button type="submit" disabled={saving}>
-              {saving ? (
-                <>
-                  <Loader2 className="h-4 w-4 animate-spin mr-1" />
-                  Saving...
-                </>
-              ) : (
-                "Save Changes"
-              )}
+            <Button variant="secondary" onClick={() => router.back()}>
+              Back
             </Button>
           </div>
-        </form>
-      )}
+
+          <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between">
+            <div>
+              <h1 className="text-2xl font-semibold text-zinc-900">
+                Company & Brand Settings
+              </h1>
+              <p className="mt-1 max-w-2xl text-sm text-zinc-600">
+                Manage Organization (Company Profile) and Brands. Brands will own
+                catalog data, while branches and devices belong under a brand.
+              </p>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <Button variant="secondary" onClick={loadAll} disabled={loading}>
+                Refresh
+              </Button>
+              {tab === "org" ? (
+                <Button onClick={openNewOrg}>New Organization</Button>
+              ) : (
+                <Button onClick={openNewBrand} disabled={!orgs.length}>
+                  New Brand
+                </Button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Error banner */}
+        {err ? (
+          <div className="mt-5 rounded-xl border border-rose-200 bg-rose-50 p-4 text-sm text-rose-700">
+            {err}
+          </div>
+        ) : null}
+
+        {/* Summary cards */}
+        <div className="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2">
+          <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+            <div className="text-xs font-medium text-zinc-500">Organizations</div>
+            <div className="mt-2 flex items-end justify-between">
+              <div className="text-3xl font-semibold text-zinc-900">{orgCount}</div>
+              <div className="text-sm text-zinc-600">Parent companies</div>
+            </div>
+          </div>
+          <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm">
+            <div className="text-xs font-medium text-zinc-500">Brands</div>
+            <div className="mt-2 flex items-end justify-between">
+              <div className="text-3xl font-semibold text-zinc-900">{brandCount}</div>
+              <div className="text-sm text-zinc-600">Child business units</div>
+            </div>
+          </div>
+        </div>
+
+        {/* Main card */}
+        <div className="mt-6 rounded-2xl border border-zinc-200 bg-white shadow-sm">
+          {/* tabs + search */}
+          <div className="flex flex-col gap-3 border-b border-zinc-200 p-4 md:flex-row md:items-center md:justify-between">
+            <div className="inline-flex rounded-xl bg-zinc-100 p-1">
+              <button
+                onClick={() => setTab("org")}
+                className={cx(
+                  "rounded-lg px-3 py-2 text-sm font-medium transition",
+                  tab === "org"
+                    ? "bg-white text-zinc-900 shadow-sm"
+                    : "text-zinc-600 hover:text-zinc-800"
+                )}
+              >
+                Organizations
+              </button>
+              <button
+                onClick={() => setTab("brand")}
+                className={cx(
+                  "rounded-lg px-3 py-2 text-sm font-medium transition",
+                  tab === "brand"
+                    ? "bg-white text-zinc-900 shadow-sm"
+                    : "text-zinc-600 hover:text-zinc-800"
+                )}
+              >
+                Brands
+              </button>
+            </div>
+
+            <div className="flex items-center gap-2">
+              <div className="relative w-full md:w-80">
+                <input
+                  value={q}
+                  onChange={(e) => setQ(e.target.value)}
+                  placeholder="Search by name, code, organization…"
+                  className="w-full rounded-xl border border-zinc-200 bg-white px-3 py-2 text-sm outline-none focus:border-zinc-300 focus:ring-2 focus:ring-zinc-900/10"
+                />
+              </div>
+            </div>
+          </div>
+
+          {/* table */}
+          <div className="overflow-x-auto">
+            {tab === "org" ? (
+              <table className="w-full text-sm">
+                <thead className="bg-zinc-50">
+                  <tr className="text-left text-xs font-semibold uppercase tracking-wide text-zinc-600">
+                    <th className="px-4 py-3">Organization</th>
+                    <th className="px-4 py-3">Code</th>
+                    <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredOrgs.map((o) => (
+                    <tr
+                      key={o.id}
+                      className="border-t border-zinc-100 hover:bg-zinc-50"
+                    >
+                      <td className="px-4 py-3">
+                        <div className="flex items-center gap-3">
+                          <div className="h-9 w-9 rounded-lg border border-zinc-200 bg-zinc-50 overflow-hidden flex items-center justify-center">
+                            {(() => {
+                              const src =
+                                o.logoUrl && o.logoUrl.trim()
+                                  ? o.logoUrl.startsWith("http")
+                                    ? o.logoUrl
+                                    : `${API}${o.logoUrl}`
+                                  : "";
+
+                              return src ? (
+                                <img
+                                  src={src}
+                                  className="h-full w-full object-contain"
+                                  alt="logo"
+                                  onError={(e) => {
+                                    (e.currentTarget as HTMLImageElement).style.display =
+                                      "none";
+                                  }}
+                                />
+                              ) : (
+                                <span className="text-[10px] text-zinc-400">
+                                  LOGO
+                                </span>
+                              );
+                            })()}
+                          </div>
+                          <div>
+                            <div className="font-medium text-zinc-900">
+                              {o.name}
+                            </div>
+                            <div className="text-xs text-zinc-500">
+                              {o.email || o.phone || "—"}
+                            </div>
+                          </div>
+                        </div>
+                      </td>
+                      <td className="px-4 py-3 font-mono text-xs text-zinc-700">
+                        {o.code}
+                      </td>
+                      <td className="px-4 py-3">
+                        <Pill active={!!o.isActive} />
+                      </td>
+                      <td className="px-4 py-3 text-right">
+                        <Button variant="secondary" onClick={() => openEditOrg(o)}>
+                          Edit
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+                  {!loading && filteredOrgs.length === 0 ? (
+                    <tr>
+                      <td
+                        className="px-4 py-10 text-center text-sm text-zinc-500"
+                        colSpan={4}
+                      >
+                        No organizations found.
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            ) : (
+              <table className="w-full text-sm">
+                <thead className="bg-zinc-50">
+                  <tr className="text-left text-xs font-semibold uppercase tracking-wide text-zinc-600">
+                    <th className="px-4 py-3">Brand</th>
+                    <th className="px-4 py-3">Code</th>
+                    <th className="px-4 py-3">Organization</th>
+                    <th className="px-4 py-3">Status</th>
+                    <th className="px-4 py-3 text-right">Actions</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredBrands.map((b) => (
+                    <tr
+                      key={b.id}
+                      className="border-t border-zinc-100 hover:bg-zinc-50 cursor-pointer"
+                      onClick={() => router.push(`/general/brands/${b.id}`)}
+                    >
+                      <td className="px-4 py-3">
+                        <div className="font-medium text-zinc-900">{b.name}</div>
+                        <div className="text-xs text-zinc-500">ID: {b.id}</div>
+                      </td>
+
+                      <td className="px-4 py-3 font-mono text-xs text-zinc-700">
+                        {b.code}
+                      </td>
+
+                      <td className="px-4 py-3 text-zinc-800">
+                        {b.organization?.name || (
+                          <span className="text-zinc-500">—</span>
+                        )}
+                      </td>
+
+                      <td className="px-4 py-3">
+                        <Pill active={!!b.isActive} />
+                      </td>
+
+                      <td className="px-4 py-3 text-right">
+                        <Button
+                          variant="secondary"
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            router.push(`/general/brands/${b.id}`);
+                          }}
+                        >
+                          Edit
+                        </Button>
+                      </td>
+                    </tr>
+                  ))}
+
+                  {!loading && filteredBrands.length === 0 ? (
+                    <tr>
+                      <td
+                        className="px-4 py-10 text-center text-sm text-zinc-500"
+                        colSpan={5}
+                      >
+                        No brands found.
+                      </td>
+                    </tr>
+                  ) : null}
+                </tbody>
+              </table>
+            )}
+          </div>
+
+          <div className="flex items-center justify-between border-t border-zinc-200 p-4 text-xs text-zinc-500">
+            <div>{loading ? "Loading…" : "Ready"}</div>
+          </div>
+        </div>
+      </div>
+
+      {/* Organization drawer */}
+      <Drawer
+        open={orgDrawer.open}
+        title={orgDraft.id ? "Edit Organization" : "New Organization"}
+        subtitle="ERP Company Profile (Address, VAT, License, Contact, Branding)."
+        onClose={() => setOrgDrawer({ open: false, item: undefined })}
+      >
+        <div className="space-y-6">
+          <SectionTitle
+            title="Branding"
+            desc="Upload logo and set primary brand color."
+          />
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <LogoUploader
+              value={orgDraft.logoUrl}
+              onUploaded={({ logoMediaId, logoUrl }) =>
+                setOrgDraft((s) => ({ ...s, logoMediaId, logoUrl }))
+              }
+            />
+            <Input
+              label="Primary Color"
+              type="color"
+              value={(orgDraft.color as any) || "#000000"}
+              onChange={(v) => setOrgDraft((s) => ({ ...s, color: v }))}
+            />
+          </div>
+
+          <SectionTitle title="Identity" desc="Company code and name." />
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <Input
+              label="Organization Code"
+              placeholder="e.g. Your Organization"
+              value={orgDraft.code || ""}
+              onChange={(v) =>
+                setOrgDraft((s) => ({ ...s, code: v.toUpperCase() }))
+              }
+            />
+            <Input
+              label="Organization Name"
+              placeholder="e.g. Your Company"
+              value={orgDraft.name || ""}
+              onChange={(v) => setOrgDraft((s) => ({ ...s, name: v }))}
+            />
+          </div>
+
+          <SectionTitle title="Contact" />
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <Input
+              label="Phone"
+              placeholder="+966 ..."
+              value={orgDraft.phone || ""}
+              onChange={(v) => setOrgDraft((s) => ({ ...s, phone: v }))}
+            />
+            <Input
+              label="Mobile"
+              placeholder="+966 ..."
+              value={orgDraft.mobile || ""}
+              onChange={(v) => setOrgDraft((s) => ({ ...s, mobile: v }))}
+            />
+            <Input
+              label="Email"
+              placeholder="info@yourdomain.com.sa"
+              value={orgDraft.email || ""}
+              onChange={(v) => setOrgDraft((s) => ({ ...s, email: v }))}
+            />
+            <Input
+              label="Website"
+              placeholder="https://yourdomain.com"
+              value={orgDraft.website || ""}
+              onChange={(v) => setOrgDraft((s) => ({ ...s, website: v }))}
+            />
+            <Input
+              label="Email Domain"
+              placeholder="yourdomain"
+              value={orgDraft.emailDomain || ""}
+              onChange={(v) => setOrgDraft((s) => ({ ...s, emailDomain: v }))}
+            />
+            <Input
+              label="Currency"
+              placeholder="SAR"
+              value={orgDraft.currency || "SAR"}
+              onChange={(v) =>
+                setOrgDraft((s) => ({ ...s, currency: v.toUpperCase() }))
+              }
+            />
+          </div>
+
+          <SectionTitle title="Address" />
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <Input
+              label="Address Line 1"
+              placeholder="Street 1"
+              value={orgDraft.addressLine1 || ""}
+              onChange={(v) => setOrgDraft((s) => ({ ...s, addressLine1: v }))}
+            />
+            <Input
+              label="Address Line 2"
+              placeholder="Street 2..."
+              value={orgDraft.addressLine2 || ""}
+              onChange={(v) => setOrgDraft((s) => ({ ...s, addressLine2: v }))}
+            />
+            <Input
+              label="Building No"
+              placeholder="1234"
+              value={orgDraft.buildingNumber || ""}
+              onChange={(v) => setOrgDraft((s) => ({ ...s, buildingNumber: v }))}
+            />
+            <Input
+              label="Additional No"
+              placeholder="1234"
+              value={orgDraft.additionalNumber || ""}
+              onChange={(v) =>
+                setOrgDraft((s) => ({ ...s, additionalNumber: v }))
+              }
+            />
+            <Input
+              label="District"
+              placeholder="District"
+              value={orgDraft.district || ""}
+              onChange={(v) => setOrgDraft((s) => ({ ...s, district: v }))}
+            />
+            <Input
+              label="City"
+              placeholder="City"
+              value={orgDraft.city || ""}
+              onChange={(v) => setOrgDraft((s) => ({ ...s, city: v }))}
+            />
+            <Input
+              label="State/Region"
+              placeholder="Region"
+              value={orgDraft.state || ""}
+              onChange={(v) => setOrgDraft((s) => ({ ...s, state: v }))}
+            />
+            <Input
+              label="Postal Code"
+              placeholder="13243"
+              value={orgDraft.postalCode || ""}
+              onChange={(v) => setOrgDraft((s) => ({ ...s, postalCode: v }))}
+            />
+            <Input
+              label="Country"
+              placeholder="Saudi Arabia"
+              value={orgDraft.country || ""}
+              onChange={(v) => setOrgDraft((s) => ({ ...s, country: v }))}
+            />
+          </div>
+
+          <SectionTitle title="Legal & VAT" />
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <Input
+              label="VAT Number"
+              placeholder="3004..."
+              value={orgDraft.vatNumber || ""}
+              onChange={(v) => setOrgDraft((s) => ({ ...s, vatNumber: v }))}
+            />
+            <Input
+              label="License Type"
+              placeholder="Commercial Registration"
+              value={orgDraft.licenseType || ""}
+              onChange={(v) => setOrgDraft((s) => ({ ...s, licenseType: v }))}
+            />
+            <Input
+              label="License Number (Seller ID)"
+              placeholder="1010..."
+              value={orgDraft.licenseNo || ""}
+              onChange={(v) => setOrgDraft((s) => ({ ...s, licenseNo: v }))}
+            />
+            <Input
+              label="Company ID"
+              placeholder="1010..."
+              value={orgDraft.companyId || ""}
+              onChange={(v) => setOrgDraft((s) => ({ ...s, companyId: v }))}
+            />
+          </div>
+
+          <Toggle
+            label="Active"
+            checked={!!orgDraft.isActive}
+            onChange={(v) => setOrgDraft((s) => ({ ...s, isActive: v }))}
+          />
+
+          <div className="flex items-center justify-end gap-2 pt-2">
+            <Button
+              variant="secondary"
+              onClick={() => setOrgDrawer({ open: false, item: undefined })}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={saveOrg}
+              disabled={
+                loading ||
+                !String(orgDraft.code || "").trim() ||
+                !String(orgDraft.name || "").trim()
+              }
+            >
+              {loading ? "Saving…" : "Save Organization"}
+            </Button>
+          </div>
+        </div>
+      </Drawer>
+
+      {/* Brand drawer */}
+      <Drawer
+        open={brandDrawer.open}
+        title={brandDraft.id ? "Edit Brand" : "New Brand"}
+        subtitle="Child business unit under an organization (JuiceTime, Quiznos, BeefShots)."
+        onClose={() => setBrandDrawer({ open: false, item: undefined })}
+      >
+        <div className="space-y-4">
+          <Select
+            label="Organization"
+            value={brandDraft.organizationId}
+            onChange={(v) => setBrandDraft((s) => ({ ...s, organizationId: v }))}
+          >
+            <option value="">Select Organization</option>
+            {orgs.map((o) => (
+              <option key={o.id} value={o.id}>
+                {o.name} ({o.code})
+              </option>
+            ))}
+          </Select>
+
+          <div className="grid grid-cols-1 gap-4 sm:grid-cols-2">
+            <Input
+              label="Brand Code"
+              placeholder="e.g. B01"
+              value={brandDraft.code}
+              onChange={(v) =>
+                setBrandDraft((s) => ({ ...s, code: v.toUpperCase() }))
+              }
+            />
+            <Input
+              label="Brand Name"
+              placeholder="e.g. Brand-01"
+              value={brandDraft.name}
+              onChange={(v) => setBrandDraft((s) => ({ ...s, name: v }))}
+            />
+          </div>
+
+          <Toggle
+            label="Active"
+            checked={brandDraft.isActive}
+            onChange={(v) => setBrandDraft((s) => ({ ...s, isActive: v }))}
+          />
+
+          <div className="flex items-center justify-end gap-2 pt-2">
+            <Button
+              variant="secondary"
+              onClick={() => setBrandDrawer({ open: false, item: undefined })}
+            >
+              Cancel
+            </Button>
+            <Button
+              onClick={saveBrand}
+              disabled={
+                loading ||
+                !brandDraft.organizationId ||
+                !brandDraft.code.trim() ||
+                !brandDraft.name.trim()
+              }
+            >
+              {loading ? "Saving…" : "Save Brand"}
+            </Button>
+          </div>
+        </div>
+      </Drawer>
     </div>
   );
 }

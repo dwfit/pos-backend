@@ -1,18 +1,21 @@
 // apps/web/app/marketing/promotions/page.tsx
-'use client';
+"use client";
 
-import React, { useEffect, useMemo, useState } from 'react';
-import { useRouter } from 'next/navigation';
-import { Plus } from 'lucide-react';
+import React, { useEffect, useMemo, useState } from "react";
+import { useRouter } from "next/navigation";
+import { Plus } from "lucide-react";
+import { authStore } from "@/lib/auth-store";
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://127.0.0.1:4000';
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:4000";
 
-type PromotionStatus = 'ACTIVE' | 'SCHEDULED' | 'EXPIRED' | 'INACTIVE';
+/* ----------------------------- types ----------------------------- */
+
+type PromotionStatus = "ACTIVE" | "SCHEDULED" | "EXPIRED" | "INACTIVE";
 
 type PromotionRow = {
   id: string;
   name: string;
-  status: PromotionStatus;
+  status: PromotionStatus; // backend status (we also compute local)
   branches: string[];
   startDate: string;
   endDate: string;
@@ -26,14 +29,16 @@ type PromotionListResponse = {
   skip: number;
 };
 
-/* ----------------------------- auth helper ----------------------------- */
+/* ----------------------------- auth + fetch ----------------------------- */
 
 function getToken() {
-  if (typeof window === 'undefined') return '';
+  if (typeof window === "undefined") return "";
   return (
-    localStorage.getItem('token') ||
-    localStorage.getItem('pos_token') ||
-    ''
+    localStorage.getItem("token") ||
+    localStorage.getItem("accessToken") ||
+    localStorage.getItem("access_token") ||
+    localStorage.getItem("pos_token") ||
+    ""
   );
 }
 
@@ -43,40 +48,55 @@ async function fetchJson<T>(input: string, init?: RequestInit): Promise<T> {
   const res = await fetch(input, {
     ...init,
     headers: {
-      'Content-Type': 'application/json',
+      Accept: "application/json",
+      ...(init?.body ? { "Content-Type": "application/json" } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(init && init.headers),
+      ...(init?.headers || {}),
     },
-    credentials: 'include',
+    cache: "no-store",
+    credentials: "include",
   });
 
-  const text = await res.text().catch(() => '');
-  if (!res.ok) {
-    throw new Error(text || `Request failed with ${res.status}`);
+  // ✅ central 401 handling
+  if (res.status === 401) {
+    authStore.expire("Session expired. Please log in again.");
+    // return safe empty payload so UI doesn't crash
+    return ({ items: [], total: 0, take: 20, skip: 0 } as unknown) as T;
   }
-  return text ? JSON.parse(text) : ({} as T);
+
+  const text = await res.text().catch(() => "");
+  if (!res.ok) {
+    let msg = text || `Request failed with ${res.status}`;
+    try {
+      const j = text ? JSON.parse(text) : null;
+      msg = j?.message || j?.error || msg;
+    } catch {
+      // ignore
+    }
+    throw new Error(msg);
+  }
+
+  if (!text) return ({} as T);
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    return ({} as T);
+  }
 }
 
 /* -------------------------- local status helper ------------------------- */
 
 function computeLocalStatus(p: PromotionRow): PromotionStatus {
   // Keep explicit INACTIVE as-is
-  if (p.status === 'INACTIVE') return 'INACTIVE';
+  if (p.status === "INACTIVE") return "INACTIVE";
 
   const now = new Date();
-
   const start = new Date(p.startDate);
   const end = new Date(p.endDate);
 
-  if (!isNaN(end.getTime()) && end < now) {
-    return 'EXPIRED';
-  }
-
-  if (!isNaN(start.getTime()) && start > now) {
-    return 'SCHEDULED';
-  }
-
-  return 'ACTIVE';
+  if (!Number.isNaN(end.getTime()) && end < now) return "EXPIRED";
+  if (!Number.isNaN(start.getTime()) && start > now) return "SCHEDULED";
+  return "ACTIVE";
 }
 
 /* ------------------------------- Component ------------------------------ */
@@ -91,10 +111,7 @@ export default function PromotionsBoardPage() {
   const [skip, setSkip] = useState(0);
   const [error, setError] = useState<string | null>(null);
 
-  const currentPage = useMemo(
-    () => Math.floor(skip / take) + 1,
-    [skip, take]
-  );
+  const currentPage = useMemo(() => Math.floor(skip / take) + 1, [skip, take]);
   const totalPages = useMemo(
     () => (total ? Math.ceil(total / take) : 1),
     [total, take]
@@ -102,26 +119,33 @@ export default function PromotionsBoardPage() {
 
   useEffect(() => {
     let cancelled = false;
+
     async function load() {
       try {
         setLoading(true);
         setError(null);
+
         const res = await fetchJson<PromotionListResponse>(
           `${API_BASE}/promotions?take=${take}&skip=${skip}`
         );
+
         if (cancelled) return;
+
         setData(res.items || []);
         setTotal(res.total || 0);
-        setTake(res.take || take);
-        setSkip(res.skip || skip);
+
+        // keep backend paging values if returned
+        if (typeof res.take === "number") setTake(res.take);
+        if (typeof res.skip === "number") setSkip(res.skip);
       } catch (err: any) {
         if (cancelled) return;
         console.error(err);
-        setError(err?.message || 'Failed to load promotions');
+        setError(err?.message || "Failed to load promotions");
       } finally {
         if (!cancelled) setLoading(false);
       }
     }
+
     load();
     return () => {
       cancelled = true;
@@ -138,7 +162,7 @@ export default function PromotionsBoardPage() {
 
     for (const p of data) {
       const status = computeLocalStatus(p);
-      base[status]?.push({ ...p, status });
+      base[status].push({ ...p, status });
     }
 
     return base;
@@ -149,7 +173,7 @@ export default function PromotionsBoardPage() {
   }
 
   function handleNewClick() {
-    router.push('/marketing/promotions/new');
+    router.push("/marketing/promotions/new");
   }
 
   function goToPage(page: number) {
@@ -158,10 +182,10 @@ export default function PromotionsBoardPage() {
   }
 
   const columns: { key: PromotionStatus; title: string }[] = [
-    { key: 'ACTIVE', title: 'Active' },
-    { key: 'SCHEDULED', title: 'Scheduled' },
-    { key: 'EXPIRED', title: 'Expired' },
-    { key: 'INACTIVE', title: 'Inactive' },
+    { key: "ACTIVE", title: "Active" },
+    { key: "SCHEDULED", title: "Scheduled" },
+    { key: "EXPIRED", title: "Expired" },
+    { key: "INACTIVE", title: "Inactive" },
   ];
 
   return (
@@ -202,7 +226,7 @@ export default function PromotionsBoardPage() {
               </div>
 
               {/* list body (scrollable) */}
-              <div className="flex-1 overflow-y-auto px-2 py-2 space-y-2">
+              <div className="flex-1 space-y-2 overflow-y-auto px-2 py-2">
                 {loading && data.length === 0 && (
                   <div className="flex items-center justify-center py-6 text-sm text-gray-500">
                     Loading…
@@ -221,18 +245,18 @@ export default function PromotionsBoardPage() {
                     onClick={() => handleRowClick(p.id)}
                     className="w-full rounded-md border bg-white px-3 py-2 text-left text-sm shadow-sm transition hover:border-violet-400 hover:bg-violet-50"
                   >
-                    <div className="font-medium line-clamp-2">
-                      {p.name}
-                    </div>
+                    <div className="line-clamp-2 font-medium">{p.name}</div>
+
                     <div className="mt-1 text-xs text-gray-500">
-                      {p.branches.slice(0, 1).join(', ')}
+                      {p.branches.slice(0, 1).join(", ")}
                       {p.branches.length > 1 && (
                         <span> +{p.branches.length - 1} more</span>
                       )}
                     </div>
+
                     <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px] text-gray-500">
                       <span>
-                        {new Date(p.startDate).toLocaleDateString()} –{' '}
+                        {new Date(p.startDate).toLocaleDateString()} –{" "}
                         {new Date(p.endDate).toLocaleDateString()}
                       </span>
                       {p.priority != null && (

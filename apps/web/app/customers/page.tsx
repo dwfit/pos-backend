@@ -2,7 +2,7 @@
 
 import { useEffect, useState } from "react";
 import { useRouter } from "next/navigation";
-import { json } from "../../lib/fetcher";
+import { apiFetch } from "@/lib/api";
 
 type Row = {
   id: string;
@@ -35,19 +35,25 @@ export default function CustomersPage() {
     let cancelled = false;
 
     async function load() {
-      setLoading(true);
-      const res = await json<CustomersApiResponse | null>(
-        `/api/customers?page=${page}&pageSize=${pageSize}`,
-        null
-      );
-      if (!cancelled) {
-        setData(res);
-        setLoading(false);
+      try {
+        setLoading(true);
+
+        // ✅ Correct endpoint (because your server is using /api prefix)
+        const res = await apiFetch<CustomersApiResponse>(
+          `/api/customers?page=${page}&pageSize=${pageSize}`
+        );
+
+        if (!cancelled) setData(res);
+      } catch (e) {
+        // apiFetch already redirects on 401; this is for other errors
+        console.error("Failed to load customers:", e);
+        if (!cancelled) setData(null);
+      } finally {
+        if (!cancelled) setLoading(false);
       }
     }
 
     load();
-
     return () => {
       cancelled = true;
     };
@@ -79,22 +85,16 @@ export default function CustomersPage() {
   const canPrev = page > 1;
   const canNext = page < totalPages;
 
-  const startIndex =
-    totalCustomers === 0 ? 0 : (page - 1) * pageSize + 1;
+  const startIndex = totalCustomers === 0 ? 0 : (page - 1) * pageSize + 1;
   const endIndex =
-    totalCustomers === 0
-      ? 0
-      : Math.min(page * pageSize, totalCustomers);
+    totalCustomers === 0 ? 0 : Math.min(page * pageSize, totalCustomers);
 
   return (
-    // 🔹 Make the page fill the viewport so footer can sit at the bottom
     <div className="space-y-6 min-h-[calc(100vh-120px)] flex flex-col">
-      {/* Page header */}
       <header className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div></div>
       </header>
 
-      {/* Summary cards */}
       <section className="grid gap-4 sm:grid-cols-3">
         <div className="rounded-2xl border border-slate-200/80 bg-white/80 px-4 py-3 shadow-sm backdrop-blur-sm">
           <div className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
@@ -140,8 +140,6 @@ export default function CustomersPage() {
         </div>
       </section>
 
-      {/* Table card */}
-      {/* 🔹 flex-1 so this card grows and the footer can sit at the bottom */}
       <div className="rounded-2xl border border-slate-200/80 bg-white/80 shadow-sm backdrop-blur-sm flex flex-col flex-1">
         <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
           <div className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
@@ -150,13 +148,12 @@ export default function CustomersPage() {
           <div className="text-xs text-slate-400">
             {loading || !data
               ? "Loading..."
-              : `${data.totalCustomers.toLocaleString(
-                  "en-SA"
-                )} customer${data.totalCustomers !== 1 ? "s" : ""}`}
+              : `${data.totalCustomers.toLocaleString("en-SA")} customer${
+                  data.totalCustomers !== 1 ? "s" : ""
+                }`}
           </div>
         </div>
 
-        {/* 🔹 flex-1 so table area takes remaining space, footer stays at bottom */}
         <div className="flex-1 overflow-auto">
           <table className="min-w-full text-sm">
             <thead className="sticky top-0 z-10 bg-slate-50/95 backdrop-blur-sm">
@@ -168,22 +165,17 @@ export default function CustomersPage() {
                 <th className="px-4 py-3 text-left">Last Order</th>
               </tr>
             </thead>
+
             <tbody className="divide-y divide-slate-100 text-sm text-slate-700">
               {loading ? (
                 <tr>
-                  <td
-                    colSpan={5}
-                    className="px-4 py-10 text-center text-slate-400"
-                  >
+                  <td colSpan={5} className="px-4 py-10 text-center text-slate-400">
                     Loading customers...
                   </td>
                 </tr>
               ) : rows.length === 0 ? (
                 <tr>
-                  <td
-                    colSpan={5}
-                    className="px-4 py-10 text-center text-slate-400"
-                  >
+                  <td colSpan={5} className="px-4 py-10 text-center text-slate-400">
                     <div className="flex flex-col items-center gap-2">
                       <div className="flex h-10 w-10 items-center justify-center rounded-full bg-slate-100">
                         <span className="text-lg">👥</span>
@@ -192,8 +184,8 @@ export default function CustomersPage() {
                         No customers yet
                       </div>
                       <p className="max-w-xs text-xs text-slate-400">
-                        Once orders are created, customers will appear here
-                        with their contact details.
+                        Once orders are created, customers will appear here with their
+                        contact details.
                       </p>
                     </div>
                   </td>
@@ -216,9 +208,7 @@ export default function CustomersPage() {
                             .join("")}
                         </div>
                         <div className="flex flex-col">
-                          <span className="font-medium text-slate-900">
-                            {r.name}
-                          </span>
+                          <span className="font-medium text-slate-900">{r.name}</span>
                           {r.totalOrders === 0 && (
                             <span className="mt-0.5 inline-flex w-fit rounded-full bg-amber-50 px-2 py-[2px] text-[10px] font-medium text-amber-700 ring-1 ring-amber-100">
                               New customer
@@ -227,9 +217,7 @@ export default function CustomersPage() {
                         </div>
                       </div>
                     </td>
-                    <td className="px-4 py-3 align-middle text-slate-700">
-                      {r.phone}
-                    </td>
+                    <td className="px-4 py-3 align-middle text-slate-700">{r.phone}</td>
                     <td className="px-4 py-3 align-middle text-slate-600">
                       {r.email || <span className="text-slate-400">—</span>}
                     </td>
@@ -246,15 +234,13 @@ export default function CustomersPage() {
           </table>
         </div>
 
-        {/* Pagination footer – now pinned to bottom of card/page */}
         <div className="flex items-center justify-between border-t border-slate-100 px-4 py-3 text-xs">
           <div className="text-slate-500">
             {totalCustomers === 0 ? (
               "Showing 0 to 0 out of 0"
             ) : (
               <>
-                Showing{" "}
-                <span className="font-medium">{startIndex}</span> to{" "}
+                Showing <span className="font-medium">{startIndex}</span> to{" "}
                 <span className="font-medium">{endIndex}</span> out of{" "}
                 <span className="font-medium">
                   {totalCustomers.toLocaleString("en-SA")}

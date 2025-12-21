@@ -9,8 +9,7 @@ type Branch = {
   name: string;
 };
 
-const API_URL =
-  process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
+const API_URL = process.env.NEXT_PUBLIC_API_URL || "http://localhost:4000";
 
 function getTodayLocalISODate() {
   const d = new Date();
@@ -19,8 +18,23 @@ function getTodayLocalISODate() {
   return local.toISOString().slice(0, 10);
 }
 
+function getToken() {
+  if (typeof window === "undefined") return "";
+  return localStorage.getItem("token") || "";
+}
+
+/** Read brand from RootLayout BrandExpose */
+function readGlobalBrandId(): string {
+  if (typeof window === "undefined") return "ALL";
+  const v = (window as any).__brandId;
+  return typeof v === "string" && v.trim() ? v.trim() : "ALL";
+}
+
 export default function OrdersPage() {
   const router = useRouter();
+
+  // brand (from layout)
+  const [brandId, setBrandId] = useState<string>(() => readGlobalBrandId());
 
   const [branch, setBranch] = useState<string>("all");
   const [date, setDate] = useState<string>(() => getTodayLocalISODate());
@@ -31,19 +45,27 @@ export default function OrdersPage() {
   const [branches, setBranches] = useState<Branch[]>([]);
   const [branchesLoading, setBranchesLoading] = useState<boolean>(false);
 
-  // 🔍 new: search by orderNo
+  // 🔍 search by orderNo
   const [search, setSearch] = useState<string>("");
 
-  // 🔢 new: pagination (client-side)
+  // 🔢 pagination (client-side)
   const [page, setPage] = useState<number>(1);
   const pageSize = 20;
 
+  // ✅ keep brand in query
   const qs = useMemo(() => {
     const p = new URLSearchParams();
+
+    // brandId:
+    // - if ALL -> omit or send ALL (both ok if backend supports)
+    // We'll send it always for clarity.
+    p.set("brandId", brandId || "ALL");
+
     if (branch && branch !== "all") p.set("branchId", branch);
     if (date) p.set("date", date);
+
     return p.toString();
-  }, [branch, date]);
+  }, [brandId, branch, date]);
 
   /* -------------------- helper: branchId -> name --------------------- */
   const branchNameById = useMemo(() => {
@@ -60,9 +82,37 @@ export default function OrdersPage() {
     router.push(`/orders/${encodeURIComponent(id)}`);
   }
 
+  /* ------------------------------------------------------------------ */
+  /* Listen to brand changes from layout                                 */
+  /* ------------------------------------------------------------------ */
+  useEffect(() => {
+    // 1) instant sync on mount
+    setBrandId(readGlobalBrandId());
+
+    // 2) polling (simple + reliable because layout doesn't dispatch events)
+    const t = setInterval(() => {
+      const next = readGlobalBrandId();
+      setBrandId((prev) => (prev !== next ? next : prev));
+    }, 250);
+
+    // 3) also react to localStorage change (if user changes brand in another tab)
+    const onStorage = (e: StorageEvent) => {
+      if (e.key === "selectedBrandId") {
+        const next = readGlobalBrandId();
+        setBrandId((prev) => (prev !== next ? next : prev));
+      }
+    };
+    window.addEventListener("storage", onStorage);
+
+    return () => {
+      clearInterval(t);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, []);
+
   /* ----------------------- load orders from API ------------------------ */
   useEffect(() => {
-    const token = localStorage.getItem("token") || "";
+    const token = getToken();
 
     setLoading(true);
     setError(null);
@@ -72,13 +122,12 @@ export default function OrdersPage() {
 
     fetch(url, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
+      credentials: "include",
     })
       .then(async (r) => {
         console.log("🔍 /orders status:", r.status);
 
-        if (r.status === 401) {
-          throw new Error("unauthorized");
-        }
+        if (r.status === 401) throw new Error("unauthorized");
         if (!r.ok) throw new Error("failed");
 
         const data = await r.json();
@@ -89,10 +138,8 @@ export default function OrdersPage() {
         if (!Array.isArray(list)) {
           if (Array.isArray((data as any).data)) list = (data as any).data;
           else if (Array.isArray((data as any).items)) list = (data as any).items;
-          else if (Array.isArray((data as any).orders))
-            list = (data as any).orders;
-          else if (Array.isArray((data as any).rows))
-            list = (data as any).rows;
+          else if (Array.isArray((data as any).orders)) list = (data as any).orders;
+          else if (Array.isArray((data as any).rows)) list = (data as any).rows;
           else list = [];
         }
 
@@ -100,19 +147,14 @@ export default function OrdersPage() {
         const normalized: OrderRow[] = list.map((o: any) => {
           const rawChannel = (o.channel ?? "").toString();
           let uiChannel: string;
-          if (!rawChannel) {
-            uiChannel = "POS";
-          } else if (rawChannel.toUpperCase() === "CALLCENTER") {
-            uiChannel = "CALLCENTER";
-          } else {
-            uiChannel = rawChannel.toUpperCase();
-          }
+
+          if (!rawChannel) uiChannel = "POS";
+          else if (rawChannel.toUpperCase() === "CALLCENTER") uiChannel = "CALLCENTER";
+          else uiChannel = rawChannel.toUpperCase();
 
           // Force PICK_UP for CallCenter, default DINE_IN for others
           let uiOrderType = "DINE_IN";
-          if (uiChannel === "CALLCENTER") {
-            uiOrderType = "PICK_UP";
-          }
+          if (uiChannel === "CALLCENTER") uiOrderType = "PICK_UP";
 
           return {
             id: o.id ?? o.orderId ?? o.orderNo ?? "",
@@ -126,9 +168,7 @@ export default function OrdersPage() {
                 : "",
             status: o.status ?? "",
             netSales:
-              typeof o.netTotal === "number"
-                ? o.netTotal
-                : Number(o.netTotal ?? 0),
+              typeof o.netTotal === "number" ? o.netTotal : Number(o.netTotal ?? 0),
             channel: uiChannel,
             orderType: uiOrderType,
           };
@@ -140,6 +180,7 @@ export default function OrdersPage() {
       .catch((err) => {
         console.error("Failed to load orders", err);
         setRows([]);
+
         if (err.message === "unauthorized") {
           setError("Session expired or unauthorized. Please log in again.");
         } else {
@@ -151,17 +192,22 @@ export default function OrdersPage() {
 
   /* ---------------------- load branches from API ----------------------- */
   useEffect(() => {
-    const token = localStorage.getItem("token") || "";
+    const token = getToken();
 
     setBranchesLoading(true);
 
-    fetch(`${API_URL}/branches`, {
+    // ✅ If your backend supports brand filtering for branches, keep it:
+    // - /branches?brandId=...
+    // If it doesn't support it yet, it will just ignore it (safe).
+    const bqs = new URLSearchParams();
+    bqs.set("brandId", brandId || "ALL");
+
+    fetch(`${API_URL}/branches?${bqs.toString()}`, {
       headers: token ? { Authorization: `Bearer ${token}` } : {},
+      credentials: "include",
     })
       .then(async (r) => {
-        if (r.status === 401) {
-          throw new Error("unauthorized");
-        }
+        if (r.status === 401) throw new Error("unauthorized");
         if (!r.ok) throw new Error("failed");
 
         const data = await r.json();
@@ -170,8 +216,7 @@ export default function OrdersPage() {
         if (!Array.isArray(list)) {
           if (Array.isArray((data as any).data)) list = (data as any).data;
           else if (Array.isArray((data as any).items)) list = (data as any).items;
-          else if (Array.isArray((data as any).branches))
-            list = (data as any).branches;
+          else if (Array.isArray((data as any).branches)) list = (data as any).branches;
           else list = [];
         }
 
@@ -180,20 +225,27 @@ export default function OrdersPage() {
           name: b.name ?? b.branchName ?? b.code ?? "Unnamed branch",
         }));
 
-        setBranches(mapped.filter((b) => !!b.id));
+        const cleaned = mapped.filter((b) => !!b.id);
+        setBranches(cleaned);
+
+        // ✅ If selected branch doesn't exist in this brand, reset to all
+        if (branch !== "all" && !cleaned.some((x) => x.id === branch)) {
+          setBranch("all");
+        }
       })
       .catch((err) => {
         console.error("Failed to load branches", err);
         setBranches([]);
+        setBranch("all");
       })
       .finally(() => setBranchesLoading(false));
-  }, []);
+  }, [brandId]); // ✅ reload branches when brand changes
 
   const money = (n: number) =>
     new Intl.NumberFormat("en-SA", {
       style: "currency",
       currency: "SAR",
-    }).format(n || 0); // avoid NaN
+    }).format(n || 0);
 
   /* ----------------- search + pagination on client ------------------ */
 
@@ -223,12 +275,9 @@ export default function OrdersPage() {
   const totalRows = filteredRows.length;
   const totalPages = Math.max(1, Math.ceil(totalRows / pageSize));
   const currentPage = Math.min(page, totalPages);
-  const startIndex =
-    totalRows === 0 ? 0 : (currentPage - 1) * pageSize + 1;
+  const startIndex = totalRows === 0 ? 0 : (currentPage - 1) * pageSize + 1;
   const endIndex =
-    totalRows === 0
-      ? 0
-      : Math.min(currentPage * pageSize, totalRows);
+    totalRows === 0 ? 0 : Math.min(currentPage * pageSize, totalRows);
 
   const paginatedRows = useMemo(
     () =>
@@ -247,6 +296,12 @@ export default function OrdersPage() {
     setPage(1);
   }, [search]);
 
+  // ✅ reset page when brand changes
+  useEffect(() => {
+    setPage(1);
+    setSearch("");
+  }, [brandId]);
+
   return (
     <div className="space-y-6 min-h-[calc(100vh-120px)] flex flex-col">
       {/* Page header */}
@@ -262,8 +317,7 @@ export default function OrdersPage() {
               {money(totalClosedNetSales)}
             </div>
             <div className="text-[11px] text-slate-400">
-              {closedRows.length} closed / {totalRows} order
-              {totalRows !== 1 && "s"}
+              {closedRows.length} closed / {totalRows} order{totalRows !== 1 && "s"}
             </div>
           </div>
         </div>
@@ -329,18 +383,17 @@ export default function OrdersPage() {
 
           <button
             className="inline-flex items-center justify-center gap-2 rounded-xl bg-slate-900 px-4 py-2 text-sm font-medium text-white shadow-sm transition hover:bg-slate-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-900/80 focus-visible:ring-offset-2 focus-visible:ring-offset-slate-100"
-            onClick={() =>
-              (window.location.href = `${API_URL}/orders/export.csv?${qs}`)
-            }
+            onClick={() => {
+              // ✅ include brandId in export too
+              window.location.href = `${API_URL}/orders/export.csv?${qs}`;
+            }}
           >
-            <span className="text-xs uppercase tracking-[0.16em]">
-              Export CSV
-            </span>
+            <span className="text-xs uppercase tracking-[0.16em]">Export CSV</span>
           </button>
         </div>
       </div>
 
-      {/* Table card (flex so footer sticks to bottom) */}
+      {/* Table card */}
       <div className="rounded-2xl border border-slate-200/80 bg-white/80 shadow-sm backdrop-blur-sm flex flex-col flex-1">
         <div className="flex items-center justify-between border-b border-slate-100 px-4 py-3">
           <div className="text-xs font-medium uppercase tracking-[0.18em] text-slate-500">
@@ -368,13 +421,11 @@ export default function OrdersPage() {
                 <th className="px-4 py-3 text-right">Net Sales</th>
               </tr>
             </thead>
+
             <tbody className="divide-y divide-slate-100 text-sm text-slate-700">
               {loading && (
                 <tr>
-                  <td
-                    colSpan={7}
-                    className="px-4 py-8 text-center text-slate-400"
-                  >
+                  <td colSpan={7} className="px-4 py-8 text-center text-slate-400">
                     Loading orders…
                   </td>
                 </tr>
@@ -382,10 +433,7 @@ export default function OrdersPage() {
 
               {!loading && error && (
                 <tr>
-                  <td
-                    colSpan={7}
-                    className="px-4 py-8 text-center text-sm text-rose-500"
-                  >
+                  <td colSpan={7} className="px-4 py-8 text-center text-sm text-rose-500">
                     {error}
                   </td>
                 </tr>
@@ -393,10 +441,7 @@ export default function OrdersPage() {
 
               {!loading && !error && paginatedRows.length === 0 && (
                 <tr>
-                  <td
-                    colSpan={7}
-                    className="px-4 py-10 text-center text-slate-400"
-                  >
+                  <td colSpan={7} className="px-4 py-10 text-center text-slate-400">
                     <div className="flex flex-col items-center gap-2">
                       <div className="flex h-10 w-10 items-center justify-center rounded-full bg-slate-100">
                         <span className="text-lg">🧾</span>
@@ -405,8 +450,8 @@ export default function OrdersPage() {
                         No orders found
                       </div>
                       <p className="max-w-xs text-xs text-slate-400">
-                        Try adjusting your filters (branch, business date, or
-                        order search) to see more results.
+                        Try adjusting your filters (branch, business date, or order search)
+                        to see more results.
                       </p>
                     </div>
                   </td>
@@ -427,23 +472,15 @@ export default function OrdersPage() {
                     </td>
                     <td className="px-4 py-3 align-middle">
                       <span className="font-medium">
-                        {r.branchId
-                          ? branchNameById[r.branchId] || r.branchId
-                          : "—"}
+                        {r.branchId ? branchNameById[r.branchId] || r.branchId : "—"}
                       </span>
                     </td>
                     <td className="px-4 py-3 align-middle text-slate-600">
                       {r.businessDate}
                     </td>
-                    <td className="px-4 py-3 align-middle">
-                      {statusBadge(r.status)}
-                    </td>
-                    <td className="px-4 py-3 align-middle text-slate-700">
-                      {r.channel}
-                    </td>
-                    <td className="px-4 py-3 align-middle text-slate-700">
-                      {r.orderType}
-                    </td>
+                    <td className="px-4 py-3 align-middle">{statusBadge(r.status)}</td>
+                    <td className="px-4 py-3 align-middle text-slate-700">{r.channel}</td>
+                    <td className="px-4 py-3 align-middle text-slate-700">{r.orderType}</td>
                     <td className="px-4 py-3 align-middle text-right font-medium text-slate-900">
                       {money(r.netSales)}
                     </td>
@@ -453,19 +490,16 @@ export default function OrdersPage() {
           </table>
         </div>
 
-        {/* Pagination footer pinned at bottom */}
+        {/* Pagination footer */}
         <div className="flex items-center justify-between border-t border-slate-100 px-4 py-3 text-xs">
           <div className="text-slate-500">
             {totalRows === 0 ? (
               "Showing 0 to 0 out of 0"
             ) : (
               <>
-                Showing{" "}
-                <span className="font-medium">{startIndex}</span> to{" "}
+                Showing <span className="font-medium">{startIndex}</span> to{" "}
                 <span className="font-medium">{endIndex}</span> out of{" "}
-                <span className="font-medium">
-                  {totalRows.toLocaleString("en-SA")}
-                </span>
+                <span className="font-medium">{totalRows.toLocaleString("en-SA")}</span>
               </>
             )}
           </div>
@@ -500,9 +534,7 @@ function statusBadge(status: string) {
 
   if (s === "paid" || s === "completed" || s === "closed") {
     return (
-      <span
-        className={`${base} bg-emerald-50 text-emerald-700 ring-emerald-100`}
-      >
+      <span className={`${base} bg-emerald-50 text-emerald-700 ring-emerald-100`}>
         ● {status}
       </span>
     );
@@ -510,9 +542,7 @@ function statusBadge(status: string) {
 
   if (s === "pending" || s === "open" || s === "active") {
     return (
-      <span
-        className={`${base} bg-amber-50 text-amber-700 ring-amber-100`}
-      >
+      <span className={`${base} bg-amber-50 text-amber-700 ring-amber-100`}>
         ● {status}
       </span>
     );

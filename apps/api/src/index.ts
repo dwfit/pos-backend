@@ -10,7 +10,12 @@ import * as http from 'http';
 import { prisma } from './db';
 import { config } from './config';
 import { hash } from './utils/crypto';
-
+import sessionRouter from "./routes/session";
+import organizationsRouter from './routes/organizations';
+import brandsRouter from './routes/brands';
+import organizationMediaRouter from "./routes/organization-media";
+import brandSettings from "./routes/brand-settings";
+import brandSettingsRouter from "./routes/brand-settings";
 import authRoutes from './routes/auth';
 import deviceRoutes from './routes/devices';
 import branchRoutes from './routes/branches';
@@ -41,6 +46,10 @@ import posOrdersRouter from './routes/pos-orders';
 import customersRouter from "./routes/customers";
 import promotionsRouter from './routes/promotions';
 import productSizesRouter from './routes/product-sizes';
+
+
+
+
 console.log(
   'DB:',
   process.env.DATABASE_URL?.replace(/\/\/.*?:.*?@/, '//****:****@'),
@@ -122,11 +131,21 @@ async function bootstrap() {
   app.use('/uploads', express.static(path.join(process.cwd(), 'uploads')));
 
   // --- routes ---
+  app.use("/", sessionRouter);
+  app.use("/organizations", organizationsRouter);
+  app.use("/organizations/media", organizationMediaRouter);
+  app.use("/brands", brandsRouter);
+  app.use("/brand-settings", brandSettings);
   app.use('/roles', roleRoutes);
   app.use('/users', userRoutes);
   app.use('/auth', authRoutes);
   app.use('/devices', deviceRoutes);
-  app.use('/branches', branchRoutes);
+  app.use("/branches", branchRoutes);
+
+console.log(
+  "branches routes:",
+  (branchRoutes as any)?.stack?.map((l: any) => l?.route && `${Object.keys(l.route.methods).join(",").toUpperCase()} ${l.route.path}`).filter(Boolean)
+);
   app.use('/menu', menuRoutes);
   app.use('/orders', orderRoutes);
   app.use('/dash', dashRoutes);
@@ -151,6 +170,9 @@ async function bootstrap() {
   app.use("/api", customersRouter);
   app.use('/promotions', promotionsRouter);
   app.use('/product-sizes', productSizesRouter);
+  app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
+
+  
   
   const port = Number(process.env.PORT || config.port || 4000);
 
@@ -160,7 +182,7 @@ async function bootstrap() {
   // create HTTP server + attach WebSocket
   const server = http.createServer(app);
   initWebSocket(server); // start socket.io / WS on same port
-
+  console.log("PID", process.pid, "PORT", port);
   server.listen(port, () => {
     console.log(`API + WS listening on :${port}`);
   });

@@ -6,7 +6,7 @@ import { compare, hash } from "../utils/crypto";
 import jwt from "jsonwebtoken";
 import { config } from "../config";
 import { requireAuth, requireRole } from "../middleware/auth";
-import { broadcastDeviceUpdate } from "../ws"; 
+import { broadcastDeviceUpdate } from "../ws";
 
 const router = Router();
 
@@ -84,8 +84,14 @@ const CreatePosDevice = z.object({
   type: z.enum(TypeVals),
   name: z.string().min(1),
   reference: z.string().min(1),
+
+  // existing
   branchId: z.string().optional(),
   branchName: z.string().optional(),
+
+  // ✅ NEW: allow creating/connecting device with brand
+  brandId: z.string().optional(),
+  brandCode: z.string().optional(), // e.g. "JT"
 });
 
 const ListQuery = z.object({
@@ -111,39 +117,78 @@ const StatusBody = z.object({ status: z.enum(StatusVals) });
 /* ----------------------- ONLINE devices (before :id!) ------------------- */
 router.get("/online", async (_req, res) => {
   try {
-    // Return only CASHIER devices that are currently USED (active on POS).
     const rows = await prisma.posDevice.findMany({
-      where: {
-        type: "CASHIER",
-        status: "USED", // ensure only in-use cashiers appear
-      },
+      where: { type: "CASHIER", status: "USED" },
       select: {
         id: true,
         name: true,
         type: true,
         status: true,
-        branch: { select: { id: true, name: true } },
+        branchId: true,
+        branch: {
+          select: {
+            id: true,
+            name: true,
+            brandId: true,
+            brand: { select: { id: true, name: true } },
+          },
+        },
       },
       orderBy: { name: "asc" },
     });
 
-    // Shape expected by web UI
     const devices = rows.map((r) => ({
       id: r.id,
       name: r.name,
-      type: r.type, // 👈 included now
-      status: r.status, // 👈 included now
-      receivesOnlineOrders: true, // 👈 surface as true for call center sending
+      type: r.type,
+      status: r.status,
+      receivesOnlineOrders: true,
+      branchId: r.branchId,
       branch: r.branch,
     }));
 
-    res.json(devices);
+    // ✅ derive brands from devices (ONLY brands actually used by these devices)
+    const brandMap = new Map<string, { id: string; name: string }>();
+    for (const d of devices) {
+      const b = d.branch?.brand;
+      if (b?.id) brandMap.set(b.id, { id: b.id, name: b.name ?? "" });
+    }
+
+    const brands = Array.from(brandMap.values()).sort((a, b) =>
+      (a.name || "").localeCompare(b.name || "")
+    );
+
+    return res.json({ brands, devices });
   } catch (err: any) {
     console.error("GET /devices/online failed:", err);
-    res
-      .status(500)
-      .json({ error: "devices_online_failed", message: err?.message });
+    return res.status(500).json({
+      error: "devices_online_failed",
+      message: err?.message,
+    });
   }
+});
+
+router.get("/online/debug", async (_req, res) => {
+  const rows = await prisma.posDevice.findMany({
+    where: { type: "CASHIER" },
+    select: {
+      id: true,
+      name: true,
+      status: true,
+      branchId: true,
+      branch: { select: { id: true, name: true, brandId: true } },
+    },
+    orderBy: { createdAt: "desc" },
+    take: 50,
+  });
+
+  res.json({
+    total: rows.length,
+    used: rows.filter((r) => r.status === "USED").length,
+    withBranch: rows.filter((r) => !!r.branchId).length,
+    withBrandOnBranch: rows.filter((r) => !!r.branch?.brandId).length,
+    sample: rows.slice(0, 10),
+  });
 });
 
 /* --------------------------------- List --------------------------------- */
@@ -246,27 +291,83 @@ router.post("/", async (req, res) => {
       .json({ error: "invalid_body", detail: body.error.flatten() });
 
   const { type, name, reference } = body.data;
-  let { branchId, branchName } = body.data;
+  let { branchId, branchName, brandId, brandCode } = body.data;
 
   try {
-    if (!branchId && branchName?.trim()) {
-      const existing = await prisma.branch.findFirst({
-        where: { name: branchName.trim() },
+    // ----------------- ✅ resolve finalBrandId -----------------
+    let finalBrandId: string | null = null;
+
+    // 1) direct brandId
+    if (brandId?.trim()) finalBrandId = brandId.trim();
+
+    // 2) brandCode lookup
+    if (!finalBrandId && brandCode?.trim()) {
+      const normalized = brandCode.trim().toUpperCase();
+      const b = await prisma.brand.findFirst({
+        where: { code: normalized },
         select: { id: true },
       });
-      branchId = existing
-        ? existing.id
-        : (
-            await prisma.branch.create({
-              data: {
-                code: slugifyCode(branchName),
-                name: branchName,
-                isActive: true,
-                tz: "Asia/Riyadh",
-              },
-              select: { id: true },
-            })
-          ).id;
+      if (!b) {
+        return res.status(400).json({
+          error: "invalid_brand_code",
+          message: `Brand code '${normalized}' not found`,
+        });
+      }
+      finalBrandId = b.id;
+    }
+
+    // 3) branchId lookup
+    if (!finalBrandId && branchId) {
+      const br = await prisma.branch.findUnique({
+        where: { id: branchId },
+        select: { id: true, brandId: true },
+      });
+      if (!br) return res.status(400).json({ error: "invalid_branchId" });
+      finalBrandId = br.brandId ?? null;
+    }
+
+    // 4) branchName lookup (existing branch)
+    if (!finalBrandId && branchName?.trim()) {
+      const existing = await prisma.branch.findFirst({
+        where: { name: branchName.trim() },
+        select: { id: true, brandId: true },
+      });
+      if (existing) {
+        branchId = existing.id;
+        finalBrandId = existing.brandId ?? null;
+      }
+    }
+
+    // if we need to CREATE a branch, brand is mandatory
+    if (!branchId && branchName?.trim()) {
+      if (!finalBrandId) {
+        return res.status(400).json({
+          error: "brand_required",
+          message:
+            "brandId (or brandCode) is required when creating a new branch by branchName.",
+        });
+      }
+
+      const createdBranch = await prisma.branch.create({
+        data: {
+          code: slugifyCode(branchName),
+          name: branchName,
+          isActive: true,
+          tz: "Asia/Riyadh",
+          brandId: finalBrandId, // ✅ IMPORTANT
+        } as any, // in case your Branch has extra required fields in some envs
+        select: { id: true },
+      });
+      branchId = createdBranch.id;
+    }
+
+    // final validation
+    if (!finalBrandId) {
+      return res.status(400).json({
+        error: "brand_required",
+        message:
+          "brandId is required (send brandId/brandCode OR provide branchId belonging to a brand).",
+      });
     }
 
     const deviceCode =
@@ -281,6 +382,7 @@ router.post("/", async (req, res) => {
         type,
         status: "NOT_USED",
         branchId: branchId ?? undefined,
+        brandId: finalBrandId, // ✅ FIX: required by schema
       },
       select: {
         id: true,
@@ -348,18 +450,28 @@ router.get("/:id", async (req, res) => {
         activationCodeGeneratedAt: true,
         lastSeenAt: true,
         appVersion: true,
-        branch: { select: { id: true, name: true } },
+        branchId: true,
+        branch: {
+          select: {
+            id: true,
+            name: true,
+            brandId: true,
+            brand: { select: { id: true, code: true, name: true } }, // ✅ add brand
+          },
+        },
       },
     });
+
     if (!d) return res.status(404).json({ error: "not_found" });
 
-    res.json({
+    return res.json({
       id: d.id,
       name: d.name,
       reference: d.reference ?? d.deviceCode,
       type: d.type,
       status: d.status,
-      branch: d.branch,
+      branchId: d.branchId,
+      branch: d.branch, // ✅ includes brand now
       createdAt: d.createdAt,
       updatedAt: d.updatedAt,
       activationCode: d.activationCode,
@@ -370,7 +482,7 @@ router.get("/:id", async (req, res) => {
     });
   } catch (err: any) {
     console.error("GET /devices/:id failed", err);
-    res
+    return res
       .status(500)
       .json({ error: "device_detail_failed", message: err?.message });
   }
@@ -402,7 +514,7 @@ router.patch("/:id", async (req, res) => {
                 name: data.branchName,
                 isActive: true,
                 tz: "Asia/Riyadh",
-              },
+              } as any,
               select: { id: true },
             })
           ).id;
@@ -620,18 +732,50 @@ router.post("/:id/activation-code", async (req, res) => {
 
 router.post("/pos/activate", async (req, res) => {
   const S = z.object({
+    brandCode: z.string().min(1),
     code: z.string().regex(/^\d{6}$/),
     platform: z.enum(["android", "ios"]).optional(),
     appVersion: z.string().optional(),
   });
-  const { code, platform, appVersion } = S.parse(req.body);
+
+  const { brandCode, code, platform, appVersion } = S.parse(req.body);
 
   try {
+    const normalizedBrandCode = brandCode.trim().toUpperCase();
+
+    // ✅ 1) Find Brand by CODE (JT / QUZ / BF)
+    const brand = await prisma.brand.findFirst({
+      where: { code: normalizedBrandCode },
+      select: { id: true, code: true, name: true }, // ✅ include name
+    });
+
+    if (!brand) {
+      return res.status(400).json({ error: "invalid_brand_code" });
+    }
+
+    // ✅ 2) Find device ONLY if activationCode belongs to a branch in this brand
     const d = await prisma.posDevice.findFirst({
-      where: { activationCode: code },
+      where: {
+        activationCode: code,
+        branch: { brandId: brand.id },
+      },
       select: { id: true, branchId: true },
     });
-    if (!d) return res.status(401).json({ error: "invalid_code" });
+
+    if (!d)
+      return res
+        .status(401)
+        .json({ error: "invalid_code_or_brand_mismatch" });
+
+    if (!d.branchId) {
+      return res.status(400).json({ error: "device_missing_branch" });
+    }
+
+    // ✅ 3) Fetch branch name
+    const branch = await prisma.branch.findUnique({
+      where: { id: d.branchId },
+      select: { id: true, name: true },
+    });
 
     const updated = await prisma.posDevice.update({
       where: { id: d.id },
@@ -646,7 +790,6 @@ router.post("/pos/activate", async (req, res) => {
       select: { id: true, branchId: true, status: true, updatedAt: true },
     });
 
-    // 🔔 WS: device activated
     broadcastDeviceUpdate({
       id: updated.id,
       status: updated.status,
@@ -660,18 +803,26 @@ router.post("/pos/activate", async (req, res) => {
       config.jwtSecret,
       { expiresIn: "12h" }
     );
-    res.json({
+
+    // ✅ Return brand + branch so mobile can show Brand/Branch
+    return res.json({
       token,
       device: {
         id: updated.id,
         branchId: updated.branchId,
         status: updated.status,
       },
+      brand: {
+        id: brand.id,
+        code: brand.code,
+        name: brand.name,
+      },
+      branch: branch ? { id: branch.id, name: branch.name } : null,
       updatedAt: updated.updatedAt,
     });
   } catch (e: any) {
     console.error("POST /devices/pos/activate failed", e);
-    res
+    return res
       .status(500)
       .json({ error: "device_activate_failed", message: e?.message });
   }
@@ -739,9 +890,7 @@ router.post("/:id/heartbeat", async (req, res) => {
     });
   } catch (e: any) {
     console.error("POST /devices/:id/heartbeat failed", e);
-    res
-      .status(500)
-      .json({ error: "heartbeat_failed", message: e?.message });
+    res.status(500).json({ error: "heartbeat_failed", message: e?.message });
   }
 });
 
@@ -764,8 +913,6 @@ router.post("/:id/force-sync", async (req, res) => {
       data: { updatedAt: new Date() },
       select: { id: true },
     });
-
-    // (Optional: could emit a specific WS event for force-sync if you want)
 
     res.status(202).json({
       accepted: true,
@@ -799,8 +946,6 @@ router.post("/sync", async (req, res) => {
       data: { updatedAt: new Date() },
       select: { id: true },
     });
-
-    // (Optional: WS push here too if needed)
 
     res.status(202).json({
       accepted: true,

@@ -9,6 +9,22 @@ type Role = {
   description?: string | null;
   permissions: string[];
 };
+type Brand = {
+  id: string;
+  name: string;
+  code?: string;
+};
+
+type Role = {
+  id: string;
+  name: string;
+  description?: string | null;
+  permissions: string[];
+
+  // NEW:
+  allowedOrganization?: boolean;
+  allowedBrandIds?: string[];    
+};
 
 const API_BASE = "http://localhost:4000";
 
@@ -302,14 +318,59 @@ function RoleModal({
   const [name, setName] = useState(existing?.name || "");
   const [nameLocalized, setNameLocalized] = useState(""); // UI only for now
   const [description, setDescription] = useState(existing?.description || "");
-  const [selected, setSelected] = useState<string[]>(existing?.permissions || []);
+
+  const [selected, setSelected] = useState<string[]>(
+    existing?.permissions || []
+  );
+
+  // ✅ always true, but show it in UI
+  const [allowedOrganization] = useState(true);
+
+  // ✅ brands
+  const [brands, setBrands] = useState<Brand[]>([]);
+  const [brandLoading, setBrandLoading] = useState(false);
+  const [allowedBrandIds, setAllowedBrandIds] = useState<string[]>(
+    existing?.allowedBrandIds || []
+  );
+
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     setName(existing?.name || "");
     setDescription(existing?.description || "");
     setSelected(existing?.permissions || []);
+    setAllowedBrandIds(existing?.allowedBrandIds || []);
   }, [existing]);
+
+  // Load brands for selection
+  useEffect(() => {
+    let mounted = true;
+    (async () => {
+      try {
+        setBrandLoading(true);
+        const res = await fetch(`${API_BASE}/brands`, {
+          credentials: "include",
+        });
+        const data = await res.json();
+
+        // supports {brands:[...]} or [...]
+        const list = Array.isArray(data)
+          ? data
+          : Array.isArray(data.brands)
+          ? data.brands
+          : [];
+
+        if (mounted) setBrands(list);
+      } catch (e) {
+        console.error("Failed to load brands", e);
+      } finally {
+        if (mounted) setBrandLoading(false);
+      }
+    })();
+    return () => {
+      mounted = false;
+    };
+  }, []);
 
   const togglePermission = (key: string) => {
     setSelected((prev) =>
@@ -338,15 +399,34 @@ function RoleModal({
     setSelected(allSelected ? [] : allPermissionKeys);
   };
 
+  // ----------------- Brand selection helpers -----------------
+  const allBrandsSelected =
+    brands.length > 0 && allowedBrandIds.length === brands.length;
+
+  const toggleBrand = (brandId: string) => {
+    setAllowedBrandIds((prev) =>
+      prev.includes(brandId) ? prev.filter((x) => x !== brandId) : [...prev, brandId]
+    );
+  };
+
+  const toggleAllBrands = () => {
+    if (!brands.length) return;
+    setAllowedBrandIds(allBrandsSelected ? [] : brands.map((b) => b.id));
+  };
+
+  // ✅ Define your meaning:
+  // - If allowedBrandIds is empty => allow ALL brands (recommended UX)
+  // - Otherwise => restrict to selected brands
+  const effectiveAllowedBrandIds =
+    allowedBrandIds.length === 0 ? null : allowedBrandIds;
+
   const save = async () => {
     if (!name.trim()) return;
     setSaving(true);
 
     try {
       const method = existing ? "PUT" : "POST";
-      const url = existing
-        ? `${API_BASE}/roles/${existing.id}`
-        : `${API_BASE}/roles`;
+      const url = existing ? `${API_BASE}/roles/${existing.id}` : `${API_BASE}/roles`;
 
       const res = await fetch(url, {
         method,
@@ -356,6 +436,10 @@ function RoleModal({
           name: name.trim(),
           description: description.trim() || undefined,
           permissions: selected,
+
+          // NEW:
+          allowedOrganization: true, // always true
+          allowedBrandIds: effectiveAllowedBrandIds, // null => allow all
         }),
       });
 
@@ -403,15 +487,61 @@ function RoleModal({
             />
           </div>
 
+          {/* ✅ Access scope section */}
+          <div className="border rounded-lg p-3">
+            <div className="font-semibold text-sm mb-2">Access Scope</div>
+
+            <label className="flex items-center gap-2 text-xs mb-3">
+              <input type="checkbox" checked={allowedOrganization} disabled />
+              Allowed Organization
+            </label>
+
+            <div className="flex items-center justify-between mb-2">
+              <div className="text-xs font-semibold">Allowed Brands</div>
+
+              <label className="flex items-center gap-2 text-xs cursor-pointer">
+                <input
+                  type="checkbox"
+                  checked={allBrandsSelected}
+                  onChange={toggleAllBrands}
+                  disabled={brandLoading || !brands.length}
+                />
+                Toggle All
+              </label>
+            </div>
+
+            <div className="text-[11px] text-gray-500 mb-2">
+              If you select <b>no brands</b>, it will mean <b>ALL brands allowed</b>.
+            </div>
+
+            <div className="border rounded p-2 max-h-[160px] overflow-y-auto">
+              {brandLoading ? (
+                <div className="text-xs text-gray-500">Loading brands…</div>
+              ) : brands.length === 0 ? (
+                <div className="text-xs text-gray-500">No brands found.</div>
+              ) : (
+                <div className="grid grid-cols-2 gap-1">
+                  {brands.map((b) => (
+                    <label key={b.id} className="flex items-center text-xs gap-2">
+                      <input
+                        type="checkbox"
+                        checked={allowedBrandIds.includes(b.id)}
+                        onChange={() => toggleBrand(b.id)}
+                      />
+                      {b.name} {b.code ? <span className="text-gray-400">({b.code})</span> : null}
+                    </label>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+
+          {/* Authorities */}
           <div>
             <div className="flex items-center justify-between mb-2">
               <h3 className="font-semibold text-sm">Authorities</h3>
               <label className="flex items-center gap-2 text-xs cursor-pointer">
-                <input
-                  type="checkbox"
-                  checked={allSelected}
-                  onChange={toggleAll}
-                />
+                <input type="checkbox" checked={allSelected} onChange={toggleAll} />
                 Toggle All
               </label>
             </div>
@@ -425,9 +555,7 @@ function RoleModal({
                 return (
                   <div key={group.key} className="mb-4">
                     <div className="flex items-center justify-between mb-1">
-                      <div className="font-semibold text-sm">
-                        {group.label}
-                      </div>
+                      <div className="font-semibold text-sm">{group.label}</div>
                       <label className="flex items-center gap-1 text-xs cursor-pointer">
                         <input
                           type="checkbox"
@@ -437,12 +565,10 @@ function RoleModal({
                         Toggle All
                       </label>
                     </div>
+
                     <div className="grid grid-cols-2 gap-1">
                       {group.permissions.map((perm) => (
-                        <label
-                          key={perm.key}
-                          className="flex items-center text-xs gap-2"
-                        >
+                        <label key={perm.key} className="flex items-center text-xs gap-2">
                           <input
                             type="checkbox"
                             checked={selected.includes(perm.key)}

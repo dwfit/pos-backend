@@ -3,49 +3,75 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { Pencil, Trash2, RotateCcw, Plus } from "lucide-react";
+import { authStore } from "@/lib/auth-store";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:4000";
 
-/* --------- auth helper (same idea as other pages) --------- */
+/* --------- auth helper (shared keys) --------- */
 function getToken() {
   if (typeof window === "undefined") return "";
-  // ✅ Try both keys so it matches whatever your login wrote
-  return (
-    localStorage.getItem("token") ||
-    localStorage.getItem("pos_token") ||
-    ""
-  );
+  try {
+    return (
+      localStorage.getItem("token") ||
+      localStorage.getItem("accessToken") ||
+      localStorage.getItem("access_token") ||
+      localStorage.getItem("pos_token") ||
+      ""
+    );
+  } catch {
+    return "";
+  }
 }
 
-async function fetchJson<T>(input: string, init?: RequestInit): Promise<T> {
+async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
   const token = getToken();
 
-  const res = await fetch(input, {
+  // Merge headers safely (Authorization must not be overwritten)
+  const headers = new Headers(init?.headers || {});
+  if (!headers.has("Accept")) headers.set("Accept", "application/json");
+
+  // Only set content-type when we send a JSON body
+  const hasBody =
+    init?.body !== undefined && init?.body !== null && init?.body !== "";
+  if (hasBody && !headers.has("Content-Type")) {
+    headers.set("Content-Type", "application/json");
+  }
+
+  if (token && !headers.has("Authorization")) {
+    headers.set("Authorization", `Bearer ${token}`);
+  }
+
+  const res = await fetch(url, {
     ...init,
-    headers: {
-      "Content-Type": "application/json",
-      // ✅ Only send Authorization if we actually have a token
-      ...(token ? { Authorization: `Bearer ${token}` } : {}),
-      ...(init?.headers || {}),
-    },
+    headers,
     credentials: "include",
+    cache: "no-store",
   });
+
+  // ✅ central 401 handling
+  if (res.status === 401) {
+    authStore.expire("Session expired. Please log in again.");
+    throw new Error("Unauthorized (401). Please login again.");
+  }
 
   // Read body as text first so we can safely handle empty / 204 responses
   const text = await res.text().catch(() => "");
 
   if (!res.ok) {
-    throw new Error(
-      `${res.status} ${res.statusText}${text ? `: ${text}` : ""}`
-    );
+    // Try parse for message
+    let msg = text;
+    try {
+      const j = text ? JSON.parse(text) : null;
+      msg = j?.message || j?.error || msg;
+    } catch {}
+
+    throw new Error(`${res.status} ${res.statusText}${msg ? `: ${msg}` : ""}`);
   }
 
-  // ✅ No content (e.g. 204) or empty body → just return null
-  if (!text) {
-    return null as T;
-  }
+  // ✅ No content (e.g. 204) or empty body → return null
+  if (!text) return null as T;
 
-  // ✅ Try to parse JSON; if it fails, log and return null
+  // ✅ Parse JSON
   try {
     return JSON.parse(text) as T;
   } catch (err) {
@@ -102,9 +128,13 @@ export default function PosSettingsPage() {
   const [loading, setLoading] = useState(false);
 
   // dialog state (add / edit)
-  const [editingScheduler, setEditingScheduler] = useState<Scheduler | null>(null);
+  const [editingScheduler, setEditingScheduler] = useState<Scheduler | null>(
+    null
+  );
   const [editingAgg, setEditingAgg] = useState<Aggregator | null>(null);
-  const [modalType, setModalType] = useState<"scheduler" | "aggregator" | null>(null);
+  const [modalType, setModalType] = useState<"scheduler" | "aggregator" | null>(
+    null
+  );
 
   // delete confirm modal state
   const [deleteType, setDeleteType] = useState<DeleteType>(null);
@@ -183,6 +213,7 @@ export default function PosSettingsPage() {
     Promise.all([loadSchedulers(), loadAggregators()])
       .catch((e) => console.error("POS settings load error", e))
       .finally(() => setLoading(false));
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   const filteredSchedulers = useMemo(() => {
@@ -226,6 +257,7 @@ export default function PosSettingsPage() {
         intervalMinutes: formInterval,
         isActive: formActive,
       };
+
       if (editingScheduler) {
         await fetchJson(
           `${API_BASE}/api/pos-settings/schedulers/${editingScheduler.id}`,
@@ -240,6 +272,7 @@ export default function PosSettingsPage() {
           body: JSON.stringify(body),
         });
       }
+
       await loadSchedulers();
       closeModal();
     } catch (e: any) {
@@ -256,6 +289,7 @@ export default function PosSettingsPage() {
         reference: formRef || "",
         isActive: formActive,
       };
+
       if (editingAgg) {
         await fetchJson(
           `${API_BASE}/api/pos-settings/aggregators/${editingAgg.id}`,
@@ -270,6 +304,7 @@ export default function PosSettingsPage() {
           body: JSON.stringify(body),
         });
       }
+
       await loadAggregators();
       closeModal();
     } catch (e: any) {
@@ -313,10 +348,9 @@ export default function PosSettingsPage() {
   }
 
   async function restoreAggregator(id: string) {
-    await fetchJson(
-      `${API_BASE}/api/pos-settings/aggregators/${id}/restore`,
-      { method: "POST" }
-    );
+    await fetchJson(`${API_BASE}/api/pos-settings/aggregators/${id}/restore`, {
+      method: "POST",
+    });
     await loadAggregators();
   }
 
@@ -381,9 +415,7 @@ export default function PosSettingsPage() {
             className="border rounded-xl px-3 py-2 text-sm min-w-[220px]"
           />
           <button
-            onClick={() =>
-              tab === "scheduler" ? openSchedulerModal() : openAggModal()
-            }
+            onClick={() => (tab === "scheduler" ? openSchedulerModal() : openAggModal())}
             className="inline-flex items-center gap-2 rounded-xl bg-black text-white text-sm px-4 py-2"
           >
             <Plus className="w-4 h-4" />
@@ -421,9 +453,7 @@ export default function PosSettingsPage() {
                       </button>
                       {!s.isDeleted ? (
                         <button
-                          onClick={() =>
-                            openDeleteConfirm("scheduler", s.id)
-                          }
+                          onClick={() => openDeleteConfirm("scheduler", s.id)}
                           className="p-1 rounded-lg hover:bg-red-50 text-red-500"
                         >
                           <Trash2 className="w-4 h-4" />
@@ -449,11 +479,7 @@ export default function PosSettingsPage() {
                           : "bg-slate-100 text-slate-600"
                       }`}
                     >
-                      {s.isDeleted
-                        ? "Deleted"
-                        : s.isActive
-                        ? "Active"
-                        : "Inactive"}
+                      {s.isDeleted ? "Deleted" : s.isActive ? "Active" : "Inactive"}
                     </span>
                     <span>Updated {fmtDateTime(s.updatedAt)}</span>
                   </div>
@@ -467,9 +493,7 @@ export default function PosSettingsPage() {
                   <div className="flex items-start justify-between gap-2">
                     <div>
                       <div className="font-medium">{a.name}</div>
-                      <div className="text-xs text-slate-500">
-                        {a.reference}
-                      </div>
+                      <div className="text-xs text-slate-500">{a.reference}</div>
                     </div>
                     <div className="flex items-center gap-2">
                       <button
@@ -480,9 +504,7 @@ export default function PosSettingsPage() {
                       </button>
                       {!a.isDeleted ? (
                         <button
-                          onClick={() =>
-                            openDeleteConfirm("aggregator", a.id)
-                          }
+                          onClick={() => openDeleteConfirm("aggregator", a.id)}
                           className="p-1 rounded-lg hover:bg-red-50 text-red-500"
                         >
                           <Trash2 className="w-4 h-4" />
@@ -508,11 +530,7 @@ export default function PosSettingsPage() {
                           : "bg-slate-100 text-slate-600"
                       }`}
                     >
-                      {a.isDeleted
-                        ? "Deleted"
-                        : a.isActive
-                        ? "Active"
-                        : "Inactive"}
+                      {a.isDeleted ? "Deleted" : a.isActive ? "Active" : "Inactive"}
                     </span>
                     <span>Updated {fmtDateTime(a.updatedAt)}</span>
                   </div>
@@ -524,10 +542,7 @@ export default function PosSettingsPage() {
       {/* Add/Edit Modal */}
       {modalType && (
         <div className="fixed inset-0 z-40 flex items-center justify-center">
-          <div
-            className="absolute inset-0 bg-black/40"
-            onClick={closeModal}
-          />
+          <div className="absolute inset-0 bg-black/40" onClick={closeModal} />
           <div className="relative w-full max-w-lg bg-white rounded-2xl shadow-2xl p-5 space-y-4">
             <div className="flex items-center justify-between">
               <h3 className="font-semibold">
@@ -605,9 +620,7 @@ export default function PosSettingsPage() {
                 Cancel
               </button>
               <button
-                onClick={() =>
-                  modalType === "scheduler" ? saveScheduler() : saveAggregator()
-                }
+                onClick={() => (modalType === "scheduler" ? saveScheduler() : saveAggregator())}
                 disabled={saving}
                 className="px-4 py-2 rounded-xl bg-black text-white text-sm disabled:opacity-50"
               >
@@ -618,18 +631,13 @@ export default function PosSettingsPage() {
         </div>
       )}
 
-      {/* Delete Confirm Modal (inside site) */}
+      {/* Delete Confirm Modal */}
       {deleteType && deleteId && (
         <div className="fixed inset-0 z-50 flex items-center justify-center">
-          <div
-            className="absolute inset-0 bg-black/40"
-            onClick={closeDeleteConfirm}
-          />
+          <div className="absolute inset-0 bg-black/40" onClick={closeDeleteConfirm} />
           <div className="relative w-full max-w-sm bg-white rounded-2xl shadow-2xl p-5 space-y-4">
             <h3 className="text-base font-semibold">
-              {deleteType === "scheduler"
-                ? "Delete scheduler"
-                : "Delete aggregator"}
+              {deleteType === "scheduler" ? "Delete scheduler" : "Delete aggregator"}
             </h3>
             <p className="text-sm text-slate-600">
               Mark this {deleteType === "scheduler" ? "scheduler" : "aggregator"} as

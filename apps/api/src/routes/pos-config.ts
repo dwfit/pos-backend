@@ -33,9 +33,7 @@ export async function getVatPercentFromDb(): Promise<number> {
     select: { rate: true },
   });
 
-  if (!tax) {
-    return 15;
-  }
+  if (!tax) return 15;
 
   const raw = Number(tax.rate);
   if (!Number.isFinite(raw)) return 15;
@@ -59,65 +57,48 @@ router.get('/config', async (req: AuthedRequest, res: Response) => {
       : [];
     const hasServerPermissions = rawPerms.length > 0;
 
-    // Just for debugging
     console.log('👤 POS config – user permissions:', rawPerms);
 
-    // ✅ Your real DB codes:
-    //   "pos.discounts.predefined.apply"
-    //   "pos.discounts.open.apply"
-    //
-    // If server *does* have permissions in the token → respect them.
-    // If server has NO permissions (current situation) → allow discounts
-    // and rely on POS app UI to enforce role-based access.
     const canApplyOpenDiscount = hasServerPermissions
       ? rawPerms.includes('pos.discounts.open.apply') ||
         rawPerms.includes('pos.discount.open.apply') ||
         rawPerms.includes('APPLY_OPEN_DISCOUNTS')
-      : true; // 👈 fallback: no server perms → don't block
+      : true;
 
     const canApplyPredefinedDiscount = hasServerPermissions
       ? rawPerms.includes('pos.discounts.predefined.apply') ||
         rawPerms.includes('pos.discount.predefined.apply') ||
         rawPerms.includes('APPLY_PREDEFINED_DISCOUNTS')
-      : true; // 👈 fallback: no server perms → don't block
+      : true;
 
     // Optional branch filter from query (?branchId=...)
     const branchIdFilterRaw =
       typeof req.query.branchId === 'string'
         ? (req.query.branchId as string)
         : undefined;
+
     const branchIdFilter = branchIdFilterRaw
       ? String(branchIdFilterRaw)
       : undefined;
 
     const methods = await prisma.paymentMethod.findMany({
-      where: {
-        isActive: true,
-      },
+      where: { isActive: true },
       orderBy: { sortOrder: 'asc' },
     });
 
     const schedulers = await prisma.posScheduler.findMany({
-      where: {
-        isActive: true,
-        isDeleted: false,
-      },
+      where: { isActive: true, isDeleted: false },
       orderBy: { createdAt: 'asc' },
     });
 
     const aggregators = await prisma.posAggregator.findMany({
-      where: {
-        isActive: true,
-        isDeleted: false,
-      },
+      where: { isActive: true, isDeleted: false },
       orderBy: { createdAt: 'asc' },
     });
 
     // ✅ only not-deleted discounts (no isActive field on Discount)
     const discountRows = await prisma.discount.findMany({
-      where: {
-        isDeleted: false,
-      },
+      where: { isDeleted: false },
       orderBy: { name: 'asc' },
     });
 
@@ -163,15 +144,10 @@ router.get('/config', async (req: AuthedRequest, res: Response) => {
     });
 
     const allDiscounts = discountRows.map((d) => {
-      // Prisma enum: FIXED | PERCENTAGE
       const mode: 'AMOUNT' | 'PERCENT' =
         d.type === 'PERCENTAGE' ? 'PERCENT' : 'AMOUNT';
 
-      // Qualification: PRODUCT | ORDER | ORDER_AND_PRODUCT
-      const q = d.qualification as
-        | 'PRODUCT'
-        | 'ORDER'
-        | 'ORDER_AND_PRODUCT';
+      const q = d.qualification as 'PRODUCT' | 'ORDER' | 'ORDER_AND_PRODUCT';
       const scope: 'ORDER' | 'ITEM' = q === 'PRODUCT' ? 'ITEM' : 'ORDER';
 
       const dId = String(d.id);
@@ -184,11 +160,11 @@ router.get('/config', async (req: AuthedRequest, res: Response) => {
         id: dId,
         name: d.name,
         nameLocalized: d.nameLocalized ?? null,
-        type: d.type, // "FIXED" | "PERCENTAGE"
+        type: d.type,
         qualification: d.qualification,
         value: Number(d.value) || 0,
-        mode, // "AMOUNT" | "PERCENT"
-        scope, // "ORDER" | "ITEM"
+        mode,
+        scope,
         taxable: d.taxable ?? false,
         reference: d.reference ?? null,
         maxDiscount: d.maxDiscount ?? null,
@@ -206,31 +182,15 @@ router.get('/config', async (req: AuthedRequest, res: Response) => {
     const discountsAfterBranchFilter = allDiscounts.filter((d) => {
       const hasBranchAssignments = d.branchIds && d.branchIds.length > 0;
 
-      // 1) Global discount: apply everywhere (explicit flag)
-      if (d.applyAllBranches) {
-        return true;
-      }
+      if (d.applyAllBranches) return true;
+      if (!hasBranchAssignments) return false;
+      if (!branchIdFilter) return false;
 
-      // 2) No explicit branch assignments and not applyAllBranches:
-      //    treat as *inactive* (do not send to POS)
-      if (!hasBranchAssignments) {
-        return false;
-      }
-
-      // 3) If client didn't send branchId -> safer to hide assigned discounts
-      if (!branchIdFilter) {
-        return false;
-      }
-
-      // 4) Only show if current branch is in list (string comparison)
-      const branchIdsStr = d.branchIds.map((b) => String(b));
-      const match = branchIdsStr.includes(String(branchIdFilter));
-
+      const match = d.branchIds.map(String).includes(String(branchIdFilter));
       return match;
     });
 
-    // 🔐 Apply role-based permission filter:
-    // - If user CANNOT apply predefined discounts => send empty list to POS
+    // 🔐 Apply role-based permission filter
     const discountsForUser = canApplyPredefinedDiscount
       ? discountsAfterBranchFilter
       : [];
@@ -279,9 +239,7 @@ router.get('/config', async (req: AuthedRequest, res: Response) => {
         createdById: a.createdById ?? null,
         updatedById: a.updatedById ?? null,
       })),
-      // 🔐 filtered list
       discounts: discountsForUser,
-      // 🔐 send permissions so POS app can hide / show buttons
       discountPermissions: {
         canApplyOpenDiscount,
         canApplyPredefinedDiscount,
@@ -376,7 +334,6 @@ router.post('/customers', async (req: Request, res: Response) => {
 
     return res.status(201).json(customer);
   } catch (err: any) {
-    // Prisma unique constraint
     if (err.code === 'P2002') {
       const target = err.meta?.target as string[] | string | undefined;
       const targetStr = Array.isArray(target)
@@ -412,7 +369,7 @@ function mapOrderTypeLabel(
   label?: string | null,
 ): 'DINE_IN' | 'TAKE_AWAY' | 'DELIVERY' | 'DRIVE_THRU' | 'B2B' {
   if (!label) return 'DINE_IN';
-  const v = label.toLowerCase();
+  const v = String(label).toLowerCase();
   if (v.includes('dine')) return 'DINE_IN';
   if (v.includes('pick') || v.includes('take')) return 'TAKE_AWAY';
   if (v.includes('drive')) return 'DRIVE_THRU';
@@ -428,6 +385,10 @@ function mapOrderTypeLabel(
 router.post('/orders', async (req: AuthedRequest, res: Response) => {
   try {
     const {
+      // ✅ NEW REQUIRED (because Prisma models require them)
+      brandId: brandIdFromBody,
+      deviceId: deviceIdFromBody,
+
       branchId: branchIdFromBody,
       branchName,
       userName,
@@ -452,6 +413,19 @@ router.post('/orders', async (req: AuthedRequest, res: Response) => {
 
     console.log('🔔 POST /pos/orders BODY:', JSON.stringify(req.body, null, 2));
     console.log('🔔 POST /pos/orders QUERY:', req.query);
+
+    // ✅ Validate required fields (brand/device)
+    const brandId =
+      typeof brandIdFromBody === 'string' ? brandIdFromBody.trim() : '';
+    const deviceId =
+      typeof deviceIdFromBody === 'string' ? deviceIdFromBody.trim() : '';
+
+    if (!brandId) {
+      return res.status(400).json({ error: 'brandId required' });
+    }
+    if (!deviceId) {
+      return res.status(400).json({ error: 'deviceId required' });
+    }
 
     const rawStatus = statusFromClient
       ? String(statusFromClient).toUpperCase()
@@ -585,7 +559,7 @@ router.post('/orders', async (req: AuthedRequest, res: Response) => {
       if (kindUpper === 'PERCENT' || kindUpper === 'PERCENTAGE') {
         discountKindForDb = DiscountType.PERCENTAGE;
       } else {
-        discountKindForDb = DiscountType.FIXED; // AMOUNT or anything else
+        discountKindForDb = DiscountType.FIXED;
       }
       discountValueForDb = new Prisma.Decimal(Number(discount.value) || 0);
     }
@@ -597,6 +571,8 @@ router.post('/orders', async (req: AuthedRequest, res: Response) => {
       discountKindForDb,
       discountValueForDb: discountValueForDb?.toString(),
       customerId,
+      brandId,
+      deviceId,
     });
 
     const itemCreates = (items as any[]).map((i) => {
@@ -614,6 +590,8 @@ router.post('/orders', async (req: AuthedRequest, res: Response) => {
         i.modifiers && Array.isArray(i.modifiers) && i.modifiers.length > 0
           ? {
               create: i.modifiers.map((m: any) => ({
+                brandId,
+                deviceId,
                 modifierItemId: String(m.modifierItemId ?? m.itemId ?? m.id),
                 price: Number(m.price ?? 0),
                 qty: Number(m.qty ?? 1),
@@ -622,6 +600,8 @@ router.post('/orders', async (req: AuthedRequest, res: Response) => {
           : undefined;
 
       return {
+        brandId,
+        deviceId,
         productId: String(i.productId),
         size: i.sizeName ? String(i.sizeName) : null,
         qty,
@@ -635,58 +615,48 @@ router.post('/orders', async (req: AuthedRequest, res: Response) => {
     const paymentCreates =
       status === 'CLOSED' && Array.isArray(payments)
         ? (payments as any[]).map((p) => ({
-            method: String(p.methodName ?? p.methodId ?? 'UNKNOWN'),
+            brandId,
+            deviceId,
+            paymentMethodId: p.methodId ? String(p.methodId) : null,
+            method: String(p.methodName ?? p.method ?? 'UNKNOWN'),
             amount: Number(p.amount),
           }))
         : [];
 
     const orderTypeEnum = mapOrderTypeLabel(orderType);
 
-    // inside router.post('/orders'...):
-
     const orderData: any = {
+      // ✅ REQUIRED relations
+      brandId,
+      deviceId,
+
       branchId,
       channel,
       orderNo,
       businessDate,
       status,
       subtotal: subtotalEx,
-    
+
       // ⬇️ discount meta
       discountTotal: new Prisma.Decimal(discountTotalValue || 0),
       discountKind: discountKindForDb ?? undefined,
       discountValue: discountValueForDb ?? undefined,
-    
+
       taxTotal: vatAmount,
       netTotal: total,
       orderType: orderTypeEnum,
-    
-      // ⭐ NEW: attach customer if sent from POS
-      ...(customerId ? { customerId: String(customerId) } : {}),
-    
+
+      // customer
+      customerId:
+        typeof customerId === 'string' && customerId.trim()
+          ? customerId
+          : null,
+
       ...(status === 'CLOSED' ? { closedAt: now } : {}),
       ...(status === 'VOID' ? { voidedAt: now } : {}),
-    
-      items: {
-        create: itemCreates,
-      },
+
+      items: { create: itemCreates },
     };
-    
-
-orderData.customerId =
-  typeof customerId === 'string' && customerId.trim()
-    ? customerId
-    : null;
-
-if (paymentCreates.length > 0) {
-  orderData.payments = { create: paymentCreates };
-}
-
-
-    // ⭐ attach customerId if provided
-    if (customerId) {
-      orderData.customerId = String(customerId);
-    }
 
     if (paymentCreates.length > 0) {
       orderData.payments = { create: paymentCreates };
@@ -716,12 +686,16 @@ if (paymentCreates.length > 0) {
       order.orderType,
       'customerId =',
       order.customerId,
+      'brandId =',
+      (order as any).brandId,
+      'deviceId =',
+      (order as any).deviceId,
       'discountTotal =',
-      order.discountTotal?.toString?.() ?? order.discountTotal,
+      (order as any).discountTotal?.toString?.() ?? (order as any).discountTotal,
       'discountKind =',
-      order.discountKind,
+      (order as any).discountKind,
       'discountValue =',
-      order.discountValue?.toString?.() ?? order.discountValue,
+      (order as any).discountValue?.toString?.() ?? (order as any).discountValue,
     );
 
     return res.status(201).json({
@@ -731,6 +705,8 @@ if (paymentCreates.length > 0) {
       status: order.status,
       channel: order.channel,
       customerId: order.customerId,
+      brandId: (order as any).brandId,
+      deviceId: (order as any).deviceId,
     });
   } catch (err) {
     console.error('POST /pos/orders ERROR', err);
@@ -739,6 +715,5 @@ if (paymentCreates.length > 0) {
       .json({ error: 'Failed to create order', details: String(err) });
   }
 });
-
 
 export default router;

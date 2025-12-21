@@ -2,14 +2,59 @@
 import { Router } from "express";
 import { prisma } from "../db";
 import { z } from "zod";
-
+import { requireAuth, requireRole } from "../middleware/auth";
 const router = Router();
 
 /* ---------- helpers ---------- */
-async function generateUniqueBranchCode() {
-  const count = await prisma.branch.count();
-  return "B" + String(count + 1).padStart(2, "0");
+
+function parseSeq(ref: string, prefix: string) {
+  const s = String(ref || "").trim();
+  if (!s.toUpperCase().startsWith(prefix.toUpperCase())) return null;
+  const tail = s.slice(prefix.length);
+  const n = Number(tail);
+  return Number.isFinite(n) ? n : null;
 }
+
+async function getBrandOrThrow(brandId: string) {
+  const brand = await prisma.brand.findUnique({
+    where: { id: brandId },
+    select: {
+      id: true,
+      name: true,
+      code: true, // ✅ USE EXISTING FIELD
+    },
+  });
+
+  if (!brand) throw new Error("Brand not found");
+
+  const prefix = String(brand.code || "").trim().toUpperCase();
+  if (!prefix) throw new Error("Brand code is missing");
+
+  return { ...brand, prefix };
+}
+
+
+async function generateNextBranchRef(tx: typeof prisma, brandId: string) {
+  const brand = await getBrandOrThrow(brandId);
+
+  // get last branch for this brand (prefer newest)
+  const last = await tx.branch.findFirst({
+    where: { brandId },
+    orderBy: { createdAt: "desc" },
+    select: { reference: true, code: true },
+  });
+
+  // if last exists and matches prefix, increment, else start from 1
+  const lastSeq =
+    (last?.reference ? parseSeq(last.reference, brand.prefix) : null) ??
+    (last?.code ? parseSeq(last.code, brand.prefix) : null) ??
+    0;
+
+  const nextSeq = lastSeq + 1;
+  const ref = `${brand.prefix}${String(nextSeq).padStart(2, "0")}`; // JB01
+  return ref;
+}
+
 function nil(v: any) {
   return v === "" ? null : v;
 }
@@ -20,7 +65,9 @@ function pickDefined<T extends object>(obj: T) {
 }
 async function resolveBranchId(idOrCode: string) {
   const b = await prisma.branch.findFirst({
-    where: { OR: [{ id: idOrCode }, { code: idOrCode }, { reference: idOrCode }] },
+    where: {
+      OR: [{ id: idOrCode }, { code: idOrCode }, { reference: idOrCode }],
+    },
     select: { id: true },
   });
   return b?.id ?? null;
@@ -29,27 +76,32 @@ async function resolveBranchId(idOrCode: string) {
 /* ---------- list (with filters) ---------- */
 router.get("/", async (req, res) => {
   const simple = String(req.query.simple || "") === "1";
+  const brandId = String(req.query.brandId || "").trim() || undefined;
 
   // ✅ SIMPLE MODE for things like discounts UI
   if (simple) {
     try {
       const branches = await prisma.branch.findMany({
+        where: brandId ? { brandId } : undefined,
         orderBy: { name: "asc" },
         select: {
           id: true,
           code: true,
           name: true,
           reference: true,
-          // no isActive here – Branch model doesn't have that field
+          brandId: true,
+          brand: { select: { name: true } },
         },
       });
 
       return res.json(
-        branches.map(b => ({
+        branches.map((b) => ({
           id: b.id,
           code: b.code,
           name: b.name,
           reference: b.reference,
+          brandId: b.brandId,
+          brandName: b.brand?.name ?? null,
         }))
       );
     } catch (err) {
@@ -79,6 +131,7 @@ router.get("/", async (req, res) => {
   const where: any = { AND: [] as any[] };
   const ci = (s: string) => ({ contains: s, mode: "insensitive" as const });
 
+  if (brandId) where.AND.push({ brandId }); // ✅ brand filter
   if (name) where.AND.push({ name: ci(name) });
   if (reference) where.AND.push({ reference: ci(reference) });
   if (taxGroup) where.AND.push({ taxGroup: ci(taxGroup) });
@@ -101,7 +154,7 @@ router.get("/", async (req, res) => {
   if (tags) {
     const list = tags
       .split(",")
-      .map(s => s.trim())
+      .map((s) => s.trim())
       .filter(Boolean);
     if (list.length) {
       where.AND.push({
@@ -126,19 +179,23 @@ router.get("/", async (req, res) => {
         taxGroup: true,
         city: true,
         createdAt: true,
+        brandId: true,
+        brand: { select: { name: true } },
       },
     }),
     prisma.branch.count({ where }),
   ]);
 
   res.json({
-    data: items.map(b => ({
+    data: items.map((b) => ({
       id: b.id,
       code: b.code,
       name: b.name,
       reference: b.reference,
       taxGroup: b.taxGroup,
       city: b.city ?? null,
+      brandId: b.brandId,
+      brandName: b.brand?.name ?? null,
       createdAt: new Date(b.createdAt).toLocaleString(),
     })),
     total,
@@ -147,8 +204,46 @@ router.get("/", async (req, res) => {
   });
 });
 
+/* ---------- meta: distinct tax groups (place BEFORE :idOrCode) ---------- */
+router.get("/tax-groups", async (_req, res) => {
+  try {
+    const taxGroups = await prisma.branch.findMany({
+      where: { taxGroup: { not: null } },
+      select: { taxGroup: true },
+      distinct: ["taxGroup"],
+      orderBy: { taxGroup: "asc" },
+    });
+    res.json({
+      data: taxGroups
+        .map((t) => t.taxGroup)
+        .filter((t): t is string => !!t && t.trim() !== ""),
+    });
+  } catch (err) {
+    console.error("GET /branches/tax-groups error:", err);
+    res.status(500).json({ error: "Failed to load tax groups" });
+  }
+});
+
+/* ---------- meta: next reference by brand (for Generate button) ---------- */
+router.get("/next-reference", async (req, res) => {
+  try {
+    const brandId = String(req.query.brandId || "").trim();
+    if (!brandId) return res.status(400).json({ error: "brandId is required" });
+
+    const ref = await prisma.$transaction(async (tx) => {
+      return generateNextBranchRef(tx, brandId);
+    });
+
+    return res.json({ data: { reference: ref } });
+  } catch (err: any) {
+    console.error("GET /branches/next-reference error:", err);
+    return res.status(400).json({ error: err?.message || "Failed to generate reference" });
+  }
+});
+
 /* ---------- create ---------- */
 const CreateBranch = z.object({
+  brandId: z.string().min(1), // ✅ required
   code: z.string().min(1).optional(),
   name: z.string().min(1),
   nameLocalized: z.string().optional().nullable(),
@@ -185,13 +280,16 @@ router.post("/", async (req, res) => {
   const data = parsed.data;
 
   try {
-    const result = await prisma.$transaction(async tx => {
-      const code =
-        (data.code && data.code.trim()) || (await generateUniqueBranchCode());
+    const result = await prisma.$transaction(async (tx) => {
+      // ✅ generate per brand if code/reference not provided
+      const autoRef = await generateNextBranchRef(tx, data.brandId);
+
+      const code = (data.code && data.code.trim()) || autoRef;
       const reference = (data.reference && data.reference.trim()) || code;
 
       const created = await tx.branch.create({
         data: {
+          brandId: data.brandId,
           code,
           name: data.name,
           nameLocalized: data.nameLocalized ?? null,
@@ -224,6 +322,8 @@ router.post("/", async (req, res) => {
           reference: true,
           taxGroup: true,
           createdAt: true,
+          brandId: true,
+          brand: { select: { name: true } },
         },
       });
 
@@ -238,7 +338,7 @@ router.post("/", async (req, res) => {
 
       if (globalDiscounts.length) {
         await tx.discountBranch.createMany({
-          data: globalDiscounts.map(d => ({
+          data: globalDiscounts.map((d) => ({
             discountId: d.id,
             branchId: created.id,
           })),
@@ -255,33 +355,62 @@ router.post("/", async (req, res) => {
       name: result.name,
       reference: result.reference,
       taxGroup: result.taxGroup,
+      brandId: result.brandId,
+      brandName: result.brand?.name ?? null,
       createdAt: new Date(result.createdAt).toLocaleString(),
     });
-  } catch (err) {
+  } catch (err: any) {
     console.error("POST /branches error:", err);
-    return res.status(500).json({ error: "Failed to create branch" });
+    return res.status(400).json({ error: err?.message || "Failed to create branch" });
   }
 });
 
-/* ---------- meta: distinct tax groups (place BEFORE :idOrCode) ---------- */
-router.get("/tax-groups", async (_req, res) => {
-  try {
-    const taxGroups = await prisma.branch.findMany({
-      where: { taxGroup: { not: null } },
-      select: { taxGroup: true },
-      distinct: ["taxGroup"],
-      orderBy: { taxGroup: "asc" },
+router.post("/", async (req, res) => {
+    const schema = z.object({
+      brandId: z.string(),
+      name: z.string().min(1),
+      nameLocalized: z.string().optional(),
+      reference: z.string().optional(),
+      code: z.string().optional(),
+      taxGroup: z.string().nullable().optional(),
+
+      branchTaxRegistrationName: z.string().optional(),
+      branchTaxNumber: z.string().optional(),
+
+      openingFrom: z.string().optional(),
+      openingTo: z.string().optional(),
+      inventoryEndOfDay: z.string().optional(),
+
+      phone: z.string().optional(),
+      address: z.string().optional(),
+
+      streetName: z.string().optional(),
+      buildingNumber: z.string().optional(),
+      additionalNumber: z.string().optional(),
+      city: z.string().optional(),
+      district: z.string().optional(),
+      postalCode: z.string().optional(),
+      crNumber: z.string().optional(),
+      latitude: z.string().optional(),
+      longitude: z.string().optional(),
+
+      displayApp: z.boolean().optional(),
+      receiptHeader: z.string().optional(),
+      receiptFooter: z.string().optional(),
     });
-    res.json({
-      data: taxGroups
-        .map(t => t.taxGroup)
-        .filter((t): t is string => !!t && t.trim() !== ""),
+
+    const data = schema.parse(req.body);
+
+    const branch = await prisma.branch.create({
+      data: {
+        ...data,
+      },
     });
-  } catch (err) {
-    console.error("GET /branches/tax-groups error:", err);
-    res.status(500).json({ error: "Failed to load tax groups" });
+
+    res.json({ data: branch });
   }
-});
+);
+
 
 /* ---------- show (by id OR code OR reference) ---------- */
 router.get("/:idOrCode", async (req, res) => {
@@ -291,6 +420,8 @@ router.get("/:idOrCode", async (req, res) => {
       where: { OR: [{ id: p }, { code: p }, { reference: p }] },
       select: {
         id: true,
+        brandId: true,
+        brand: { select: { name: true } },
         code: true,
         name: true,
         nameLocalized: true,
@@ -307,7 +438,6 @@ router.get("/:idOrCode", async (req, res) => {
         district: true,
         postalCode: true,
         tz: true,
-        // no isActive field in your model
         createdAt: true,
         updatedAt: true,
       },
@@ -338,7 +468,7 @@ router.get("/:idOrCode", async (req, res) => {
       }),
     ]);
 
-    const users = userLinks.map(u => ({
+    const users = userLinks.map((u) => ({
       id: u.user.id,
       name: u.user.name ?? "—",
       email: u.user.email ?? "—",
@@ -347,7 +477,7 @@ router.get("/:idOrCode", async (req, res) => {
       assignedAt: u.assignedAt,
     }));
 
-    const assignedDevices = posDevices.map(d => ({
+    const assignedDevices = posDevices.map((d) => ({
       id: d.id,
       name: d.name || "—",
       reference: d.name || d.id,
@@ -356,7 +486,10 @@ router.get("/:idOrCode", async (req, res) => {
     }));
 
     return res.json({
-      branch,
+      branch: {
+        ...branch,
+        brandName: branch.brand?.name ?? null,
+      },
       tags: [],
       deliveryZones: [],
       users,
@@ -393,17 +526,15 @@ async function updateBranchHandler(req: any, res: any) {
   const b = parsed.data;
 
   const data = pickDefined({
+    brandId: b.brandId?.trim(), // ✅ allow re-assign (optional)
     name: b.name?.trim(),
     nameLocalized: b.nameLocalized === undefined ? undefined : nil(b.nameLocalized),
     reference: b.reference === undefined ? undefined : b.reference?.trim() || null,
     code: b.code === undefined ? undefined : b.code?.trim() || null,
     taxGroup: b.taxGroup === undefined ? undefined : nil(b.taxGroup),
     branchTaxRegistrationName:
-      b.branchTaxRegistrationName === undefined
-        ? undefined
-        : nil(b.branchTaxRegistrationName),
-    branchTaxNumber:
-      b.branchTaxNumber === undefined ? undefined : nil(b.branchTaxNumber),
+      b.branchTaxRegistrationName === undefined ? undefined : nil(b.branchTaxRegistrationName),
+    branchTaxNumber: b.branchTaxNumber === undefined ? undefined : nil(b.branchTaxNumber),
     openingFrom: b.openingFrom === undefined ? undefined : nil(b.openingFrom),
     openingTo: b.openingTo === undefined ? undefined : nil(b.openingTo),
     inventoryEndOfDay:
@@ -411,8 +542,7 @@ async function updateBranchHandler(req: any, res: any) {
     phone: b.phone === undefined ? undefined : nil(b.phone),
     address: b.address === undefined ? undefined : nil(b.address),
     streetName: b.streetName === undefined ? undefined : nil(b.streetName),
-    buildingNumber:
-      b.buildingNumber === undefined ? undefined : nil(b.buildingNumber),
+    buildingNumber: b.buildingNumber === undefined ? undefined : nil(b.buildingNumber),
     additionalNumber:
       b.additionalNumber === undefined ? undefined : nil(b.additionalNumber),
     city: b.city === undefined ? undefined : nil(b.city),
@@ -422,10 +552,8 @@ async function updateBranchHandler(req: any, res: any) {
     latitude: b.latitude === undefined ? undefined : nil(b.latitude),
     longitude: b.longitude === undefined ? undefined : nil(b.longitude),
     displayApp: b.displayApp === undefined ? undefined : !!b.displayApp,
-    receiptHeader:
-      b.receiptHeader === undefined ? undefined : nil(b.receiptHeader),
-    receiptFooter:
-      b.receiptFooter === undefined ? undefined : nil(b.receiptFooter),
+    receiptHeader: b.receiptHeader === undefined ? undefined : nil(b.receiptHeader),
+    receiptFooter: b.receiptFooter === undefined ? undefined : nil(b.receiptFooter),
   });
 
   try {
@@ -434,6 +562,8 @@ async function updateBranchHandler(req: any, res: any) {
       data,
       select: {
         id: true,
+        brandId: true,
+        brand: { select: { name: true } },
         code: true,
         name: true,
         reference: true,
@@ -445,6 +575,8 @@ async function updateBranchHandler(req: any, res: any) {
 
     return res.json({
       id: updated.id,
+      brandId: updated.brandId,
+      brandName: updated.brand?.name ?? null,
       code: updated.code,
       name: updated.name,
       reference: updated.reference,
