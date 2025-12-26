@@ -391,12 +391,12 @@ model ProductSize {
   productId String
   product   Product @relation(fields: [productId], references: [id], onDelete: Cascade)
 
-  name  String
-  code  String?
-  price Decimal @db.Decimal(10, 2)
-
-  brandId String?
-  brand   Brand?  @relation(fields: [brandId], references: [id])
+  name       String
+  code       String?
+  price      Decimal                @db.Decimal(10, 2)
+  tierPrices TierProductSizePrice[]
+  brandId    String?
+  brand      Brand?                 @relation(fields: [brandId], references: [id])
 
   discountSizeLinks DiscountProductSize[]
   promotions        PromotionProduct[]
@@ -603,12 +603,13 @@ model ModifierItem {
   groupId String
   group   ModifierGroup @relation(fields: [groupId], references: [id], onDelete: Cascade)
 
-  name      String
-  price     Decimal   @db.Decimal(12, 2)
-  isActive  Boolean   @default(true)
-  deletedAt DateTime?
-  createdAt DateTime  @default(now())
-  updatedAt DateTime  @updatedAt
+  name       String
+  tierPrices TierModifierItemPrice[]
+  price      Decimal                 @db.Decimal(12, 2)
+  isActive   Boolean                 @default(true)
+  deletedAt  DateTime?
+  createdAt  DateTime                @default(now())
+  updatedAt  DateTime                @updatedAt
 
   taxId Int?
   tax   Tax? @relation(fields: [taxId], references: [id], onDelete: SetNull)
@@ -630,6 +631,49 @@ model ProductModifier {
   @@unique([productId, modifierId])
   @@index([productId])
   @@index([modifierId])
+}
+
+/**
+ * ----------------------------- Pricelist -----------------------------
+ */
+model PriceTier {
+  id       String  @id @default(cuid())
+  name     String
+  code     String  @unique // e.g. "NORMAL", "B2B", "JAHEZ", "HUNGERSTATION"
+  type     String? // e.g. "NORMAL" | "AGGREGATOR" | "B2B" (optional)
+  isActive Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  sizePrices     TierProductSizePrice[]
+  modifierPrices TierModifierItemPrice[]
+}
+
+model TierProductSizePrice {
+  id            String  @id @default(cuid())
+  tierId        String
+  productSizeId String
+  price         Decimal @db.Decimal(10, 2)
+
+  tier        PriceTier   @relation(fields: [tierId], references: [id], onDelete: Cascade)
+  productSize ProductSize @relation(fields: [productSizeId], references: [id], onDelete: Cascade)
+
+  @@unique([tierId, productSizeId])
+  @@index([productSizeId])
+}
+
+model TierModifierItemPrice {
+  id             String  @id @default(cuid())
+  tierId         String
+  modifierItemId String
+  price          Decimal @db.Decimal(10, 2)
+
+  tier         PriceTier    @relation(fields: [tierId], references: [id], onDelete: Cascade)
+  modifierItem ModifierItem @relation(fields: [modifierItemId], references: [id], onDelete: Cascade)
+
+  @@unique([tierId, modifierItemId])
+  @@index([modifierItemId])
 }
 
 /**

@@ -1,9 +1,9 @@
 // apps/api/src/routes/pos-config.ts
-import { Router, Request, Response } from 'express';
-import { prisma } from '../db';
-import { z } from 'zod';
-import { requireAuth } from '../middleware/auth';
-import { DiscountType, Prisma } from '@prisma/client';
+import { Router, Request, Response } from "express";
+import { prisma } from "../db";
+import { z } from "zod";
+import { requireAuth } from "../middleware/auth";
+import { DiscountType, Prisma } from "@prisma/client";
 
 const router = Router();
 
@@ -22,14 +22,13 @@ type AuthedRequest = Request & {
 /* ------------------------------------------------------------------ */
 /* VAT helper – always read from tax table                            */
 /* ------------------------------------------------------------------ */
-
 /**
  * Returns VAT as PERCENT (e.g. 15) for the POS app.
  * Supports tax.rate stored as 15 or 0.15.
  */
 export async function getVatPercentFromDb(): Promise<number> {
   const tax = await prisma.tax.findFirst({
-    orderBy: { id: 'asc' },
+    orderBy: { id: "asc" },
     select: { rate: true },
   });
 
@@ -42,74 +41,127 @@ export async function getVatPercentFromDb(): Promise<number> {
 }
 
 /* ------------------------------------------------------------------ */
-/* GET /pos/config – VAT + Payment Methods + Schedulers + Aggregators */
-/* + Predefined discounts for POS (filtered by branch assignments)    */
-/* + Role-based discount permissions                                  */
+/* Helper: resolve brandId                                            */
 /* ------------------------------------------------------------------ */
 
-router.get('/config', async (req: AuthedRequest, res: Response) => {
+async function resolveBrandId(req: Request): Promise<{
+  brandId: string | null;
+  brands: { id: string; name: string; code: string | null; isActive: boolean }[];
+  resolvedFrom: "query.brandId" | "query.deviceId" | "firstActiveBrand" | "none";
+}> {
+  // Always return active brands list for POS app to pick from
+  const brands = await prisma.brand.findMany({
+    where: { isActive: true },
+    orderBy: { name: "asc" },
+    select: { id: true, name: true, code: true, isActive: true },
+  });
+
+  const brandIdFromQuery =
+    typeof req.query.brandId === "string" && req.query.brandId.trim()
+      ? req.query.brandId.trim()
+      : null;
+
+  if (brandIdFromQuery) {
+    const ok = brands.some((b) => b.id === brandIdFromQuery);
+    return {
+      brandId: ok ? brandIdFromQuery : brands[0]?.id ?? null,
+      brands,
+      resolvedFrom: "query.brandId",
+    };
+  }
+
+  // If the POS app sends deviceId, infer brandId via Device (if your schema has brandId on Device)
+  const deviceIdFromQuery =
+    typeof req.query.deviceId === "string" && req.query.deviceId.trim()
+      ? req.query.deviceId.trim()
+      : null;
+
+  if (deviceIdFromQuery) {
+    try {
+      const dev: any = await prisma.device.findUnique({
+        where: { id: deviceIdFromQuery },
+        select: { id: true, brandId: true },
+      });
+
+      const inferred = dev?.brandId ? String(dev.brandId) : null;
+      if (inferred && brands.some((b) => b.id === inferred)) {
+        return { brandId: inferred, brands, resolvedFrom: "query.deviceId" };
+      }
+    } catch {
+      // ignore safely if device model/field differs
+    }
+  }
+
+  if (brands.length) {
+    return { brandId: brands[0].id, brands, resolvedFrom: "firstActiveBrand" };
+  }
+
+  return { brandId: null, brands: [], resolvedFrom: "none" };
+}
+
+/* ------------------------------------------------------------------ */
+/* GET /pos/config                                                    */
+/* ------------------------------------------------------------------ */
+
+router.get("/config", requireAuth, async (req: AuthedRequest, res: Response) => {
   try {
     const vatRate = await getVatPercentFromDb(); // percent, e.g. 15
 
-    // 🔐 Permissions from auth middleware (may be missing for POS)
+    // ✅ resolve brandId for POS app menu sync
+    const { brandId, brands, resolvedFrom } = await resolveBrandId(req);
+
+    // 🔐 Permissions from auth middleware
     const rawPerms = Array.isArray(req.user?.permissions)
       ? (req.user!.permissions as string[])
       : [];
     const hasServerPermissions = rawPerms.length > 0;
 
-    console.log('👤 POS config – user permissions:', rawPerms);
+    console.log("👤 POS config – user permissions:", rawPerms);
+    console.log("🏷️ POS config – resolved brand:", { brandId, resolvedFrom });
 
     const canApplyOpenDiscount = hasServerPermissions
-      ? rawPerms.includes('pos.discounts.open.apply') ||
-        rawPerms.includes('pos.discount.open.apply') ||
-        rawPerms.includes('APPLY_OPEN_DISCOUNTS')
+      ? rawPerms.includes("pos.discounts.open.apply") ||
+        rawPerms.includes("pos.discount.open.apply") ||
+        rawPerms.includes("APPLY_OPEN_DISCOUNTS")
       : true;
 
     const canApplyPredefinedDiscount = hasServerPermissions
-      ? rawPerms.includes('pos.discounts.predefined.apply') ||
-        rawPerms.includes('pos.discount.predefined.apply') ||
-        rawPerms.includes('APPLY_PREDEFINED_DISCOUNTS')
+      ? rawPerms.includes("pos.discounts.predefined.apply") ||
+        rawPerms.includes("pos.discount.predefined.apply") ||
+        rawPerms.includes("APPLY_PREDEFINED_DISCOUNTS")
       : true;
 
     // Optional branch filter from query (?branchId=...)
     const branchIdFilterRaw =
-      typeof req.query.branchId === 'string'
-        ? (req.query.branchId as string)
-        : undefined;
+      typeof req.query.branchId === "string" ? (req.query.branchId as string) : undefined;
 
-    const branchIdFilter = branchIdFilterRaw
-      ? String(branchIdFilterRaw)
-      : undefined;
+    const branchIdFilter = branchIdFilterRaw ? String(branchIdFilterRaw) : undefined;
 
     const methods = await prisma.paymentMethod.findMany({
       where: { isActive: true },
-      orderBy: { sortOrder: 'asc' },
+      orderBy: { sortOrder: "asc" },
     });
 
     const schedulers = await prisma.posScheduler.findMany({
       where: { isActive: true, isDeleted: false },
-      orderBy: { createdAt: 'asc' },
+      orderBy: { createdAt: "asc" },
     });
 
     const aggregators = await prisma.posAggregator.findMany({
       where: { isActive: true, isDeleted: false },
-      orderBy: { createdAt: 'asc' },
+      orderBy: { createdAt: "asc" },
     });
 
     // ✅ only not-deleted discounts (no isActive field on Discount)
     const discountRows = await prisma.discount.findMany({
       where: { isDeleted: false },
-      orderBy: { name: 'asc' },
+      orderBy: { name: "asc" },
     });
 
     // Link tables (branches / categories / product sizes)
     const [branchLinks, categoryLinks, productSizeLinks] = await Promise.all([
-      prisma.discountBranch.findMany({
-        select: { discountId: true, branchId: true },
-      }),
-      prisma.discountCategory.findMany({
-        select: { discountId: true, categoryId: true },
-      }),
+      prisma.discountBranch.findMany({ select: { discountId: true, branchId: true } }),
+      prisma.discountCategory.findMany({ select: { discountId: true, categoryId: true } }),
       prisma.discountProductSize.findMany({
         select: { discountId: true, productSizeId: true, productId: true },
       }),
@@ -144,11 +196,10 @@ router.get('/config', async (req: AuthedRequest, res: Response) => {
     });
 
     const allDiscounts = discountRows.map((d) => {
-      const mode: 'AMOUNT' | 'PERCENT' =
-        d.type === 'PERCENTAGE' ? 'PERCENT' : 'AMOUNT';
+      const mode: "AMOUNT" | "PERCENT" = d.type === "PERCENTAGE" ? "PERCENT" : "AMOUNT";
 
-      const q = d.qualification as 'PRODUCT' | 'ORDER' | 'ORDER_AND_PRODUCT';
-      const scope: 'ORDER' | 'ITEM' = q === 'PRODUCT' ? 'ITEM' : 'ORDER';
+      const q = d.qualification as "PRODUCT" | "ORDER" | "ORDER_AND_PRODUCT";
+      const scope: "ORDER" | "ITEM" = q === "PRODUCT" ? "ITEM" : "ORDER";
 
       const dId = String(d.id);
       const branchIds = branchMap[dId] ?? [];
@@ -186,17 +237,14 @@ router.get('/config', async (req: AuthedRequest, res: Response) => {
       if (!hasBranchAssignments) return false;
       if (!branchIdFilter) return false;
 
-      const match = d.branchIds.map(String).includes(String(branchIdFilter));
-      return match;
+      return d.branchIds.map(String).includes(String(branchIdFilter));
     });
 
     // 🔐 Apply role-based permission filter
-    const discountsForUser = canApplyPredefinedDiscount
-      ? discountsAfterBranchFilter
-      : [];
+    const discountsForUser = canApplyPredefinedDiscount ? discountsAfterBranchFilter : [];
 
     console.log(
-      '📦 /pos/config discounts summary:',
+      "📦 /pos/config discounts summary:",
       JSON.stringify(
         {
           totalInDb: discountRows.length,
@@ -205,19 +253,33 @@ router.get('/config', async (req: AuthedRequest, res: Response) => {
           branchIdFilter,
           canApplyOpenDiscount,
           canApplyPredefinedDiscount,
+          brandId,
+          resolvedFrom,
         },
         null,
-        2,
-      ),
+        2
+      )
     );
 
     return res.json({
+      // ✅ NEW: for menu sync
+      brandId,
+      brands: brands.map((b) => ({
+        id: b.id,
+        name: b.name,
+        code: b.code ?? null,
+        isActive: b.isActive,
+      })),
+      resolvedBrandFrom: resolvedFrom,
+
       vatRate,
+
       paymentMethods: methods.map((m) => ({
         id: m.id,
         code: m.code ?? null,
         name: m.name,
       })),
+
       schedulers: schedulers.map((s) => ({
         id: s.id,
         name: s.name,
@@ -229,6 +291,7 @@ router.get('/config', async (req: AuthedRequest, res: Response) => {
         createdById: s.createdById ?? null,
         updatedById: s.updatedById ?? null,
       })),
+
       aggregators: aggregators.map((a) => ({
         id: a.id,
         name: a.name,
@@ -239,6 +302,7 @@ router.get('/config', async (req: AuthedRequest, res: Response) => {
         createdById: a.createdById ?? null,
         updatedById: a.updatedById ?? null,
       })),
+
       discounts: discountsForUser,
       discountPermissions: {
         canApplyOpenDiscount,
@@ -246,10 +310,8 @@ router.get('/config', async (req: AuthedRequest, res: Response) => {
       },
     });
   } catch (err) {
-    console.error('GET /pos/config FATAL ERROR:', err);
-    return res
-      .status(500)
-      .json({ error: 'Failed to load POS config', details: String(err) });
+    console.error("GET /pos/config FATAL ERROR:", err);
+    return res.status(500).json({ error: "Failed to load POS config", details: String(err) });
   }
 });
 
@@ -258,13 +320,13 @@ router.get('/config', async (req: AuthedRequest, res: Response) => {
 /* ------------------------------------------------------------------ */
 
 const createCustomerSchema = z.object({
-  name: z.string().min(1, 'Name is required'),
-  phone: z.string().min(5, 'Phone is required'),
+  name: z.string().min(1, "Name is required"),
+  phone: z.string().min(5, "Phone is required"),
   email: z
     .string()
-    .email('Invalid email')
+    .email("Invalid email")
     .optional()
-    .or(z.literal(''))
+    .or(z.literal(""))
     .transform((v) => (v && v.trim().length > 0 ? v.trim() : undefined)),
 });
 
@@ -272,14 +334,14 @@ const createCustomerSchema = z.object({
 /* GET /pos/customers?search=                                         */
 /* ------------------------------------------------------------------ */
 
-router.get('/customers', async (req: Request, res: Response) => {
+router.get("/customers", async (req: Request, res: Response) => {
   try {
-    const search = (req.query.search as string | undefined)?.trim() || '';
+    const search = (req.query.search as string | undefined)?.trim() || "";
 
     const where = search
       ? {
           OR: [
-            { name: { contains: search, mode: 'insensitive' } },
+            { name: { contains: search, mode: "insensitive" } },
             { phone: { contains: search } },
           ],
         }
@@ -287,7 +349,7 @@ router.get('/customers', async (req: Request, res: Response) => {
 
     const customers = await prisma.customer.findMany({
       where,
-      orderBy: { createdAt: 'desc' },
+      orderBy: { createdAt: "desc" },
       take: 50,
     });
 
@@ -297,14 +359,11 @@ router.get('/customers', async (req: Request, res: Response) => {
         name: c.name,
         phone: c.phone,
         email: c.email,
-      })),
+      }))
     );
   } catch (err: any) {
-    console.error('GET /pos/customers ERROR', err);
-    return res.status(500).json({
-      error: 'Failed to load customers',
-      details: err?.message,
-    });
+    console.error("GET /pos/customers ERROR", err);
+    return res.status(500).json({ error: "Failed to load customers", details: err?.message });
   }
 });
 
@@ -312,14 +371,11 @@ router.get('/customers', async (req: Request, res: Response) => {
 /* POST /pos/customers                                                */
 /* ------------------------------------------------------------------ */
 
-router.post('/customers', async (req: Request, res: Response) => {
+router.post("/customers", async (req: Request, res: Response) => {
   try {
     const parsed = createCustomerSchema.safeParse(req.body);
     if (!parsed.success) {
-      return res.status(400).json({
-        error: 'Validation failed',
-        details: parsed.error.flatten(),
-      });
+      return res.status(400).json({ error: "Validation failed", details: parsed.error.flatten() });
     }
 
     const { name, phone, email } = parsed.data;
@@ -334,30 +390,19 @@ router.post('/customers', async (req: Request, res: Response) => {
 
     return res.status(201).json(customer);
   } catch (err: any) {
-    if (err.code === 'P2002') {
+    if (err.code === "P2002") {
       const target = err.meta?.target as string[] | string | undefined;
-      const targetStr = Array.isArray(target)
-        ? target.join(',')
-        : String(target || '');
+      const targetStr = Array.isArray(target) ? target.join(",") : String(target || "");
 
-      let message = 'Customer already exists';
-      if (targetStr.includes('phone')) {
-        message = 'Customer with this phone already exists';
-      } else if (targetStr.includes('email')) {
-        message = 'Customer with this email already exists';
-      }
+      let message = "Customer already exists";
+      if (targetStr.includes("phone")) message = "Customer with this phone already exists";
+      else if (targetStr.includes("email")) message = "Customer with this email already exists";
 
-      return res.status(409).json({
-        error: message,
-        field: err.meta?.target,
-      });
+      return res.status(409).json({ error: message, field: err.meta?.target });
     }
 
-    console.error('POST /pos/customers ERROR', err);
-    return res.status(500).json({
-      error: 'Failed to create customer',
-      details: err?.message,
-    });
+    console.error("POST /pos/customers ERROR", err);
+    return res.status(500).json({ error: "Failed to create customer", details: err?.message });
   }
 });
 
@@ -365,27 +410,24 @@ router.post('/customers', async (req: Request, res: Response) => {
 /* Helper: map orderType label from POS screen → Prisma enum          */
 /* ------------------------------------------------------------------ */
 
-function mapOrderTypeLabel(
-  label?: string | null,
-): 'DINE_IN' | 'TAKE_AWAY' | 'DELIVERY' | 'DRIVE_THRU' | 'B2B' {
-  if (!label) return 'DINE_IN';
+function mapOrderTypeLabel(label?: string | null): "DINE_IN" | "TAKE_AWAY" | "DELIVERY" | "DRIVE_THRU" | "B2B" {
+  if (!label) return "DINE_IN";
   const v = String(label).toLowerCase();
-  if (v.includes('dine')) return 'DINE_IN';
-  if (v.includes('pick') || v.includes('take')) return 'TAKE_AWAY';
-  if (v.includes('drive')) return 'DRIVE_THRU';
-  if (v.includes('b2b')) return 'B2B';
-  if (v.includes('deliv')) return 'DELIVERY';
-  return 'DINE_IN';
+  if (v.includes("dine")) return "DINE_IN";
+  if (v.includes("pick") || v.includes("take")) return "TAKE_AWAY";
+  if (v.includes("drive")) return "DRIVE_THRU";
+  if (v.includes("b2b")) return "B2B";
+  if (v.includes("deliv")) return "DELIVERY";
+  return "DINE_IN";
 }
 
 /* ------------------------------------------------------------------ */
 /* POST /pos/orders                                                   */
 /* ------------------------------------------------------------------ */
 
-router.post('/orders', async (req: AuthedRequest, res: Response) => {
+router.post("/orders", async (req: AuthedRequest, res: Response) => {
   try {
     const {
-      // ✅ NEW REQUIRED (because Prisma models require them)
       brandId: brandIdFromBody,
       deviceId: deviceIdFromBody,
 
@@ -407,67 +449,43 @@ router.post('/orders', async (req: AuthedRequest, res: Response) => {
     } = req.body;
 
     const branchIdFromQuery =
-      typeof req.query.branchId === 'string'
-        ? (req.query.branchId as string)
-        : undefined;
+      typeof req.query.branchId === "string" ? (req.query.branchId as string) : undefined;
 
-    console.log('🔔 POST /pos/orders BODY:', JSON.stringify(req.body, null, 2));
-    console.log('🔔 POST /pos/orders QUERY:', req.query);
+    console.log("🔔 POST /pos/orders BODY:", JSON.stringify(req.body, null, 2));
+    console.log("🔔 POST /pos/orders QUERY:", req.query);
 
-    // ✅ Validate required fields (brand/device)
-    const brandId =
-      typeof brandIdFromBody === 'string' ? brandIdFromBody.trim() : '';
-    const deviceId =
-      typeof deviceIdFromBody === 'string' ? deviceIdFromBody.trim() : '';
+    const brandId = typeof brandIdFromBody === "string" ? brandIdFromBody.trim() : "";
+    const deviceId = typeof deviceIdFromBody === "string" ? deviceIdFromBody.trim() : "";
 
-    if (!brandId) {
-      return res.status(400).json({ error: 'brandId required' });
-    }
-    if (!deviceId) {
-      return res.status(400).json({ error: 'deviceId required' });
-    }
+    if (!brandId) return res.status(400).json({ error: "brandId required" });
+    if (!deviceId) return res.status(400).json({ error: "deviceId required" });
 
-    const rawStatus = statusFromClient
-      ? String(statusFromClient).toUpperCase()
-      : '';
+    const rawStatus = statusFromClient ? String(statusFromClient).toUpperCase() : "";
 
-    let status: 'ACTIVE' | 'CLOSED' | 'VOID';
-    if (rawStatus === 'ACTIVE') status = 'ACTIVE';
-    else if (rawStatus === 'VOID') status = 'VOID';
-    else if (rawStatus === 'CLOSED') status = 'CLOSED';
-    else status = 'CLOSED';
+    let status: "ACTIVE" | "CLOSED" | "VOID";
+    if (rawStatus === "ACTIVE") status = "ACTIVE";
+    else if (rawStatus === "VOID") status = "VOID";
+    else if (rawStatus === "CLOSED") status = "CLOSED";
+    else status = "CLOSED";
 
-    type Channel = 'POS' | 'CallCenter';
+    type Channel = "POS" | "CallCenter";
 
-    const rawChannelFromBody = channelFromClient
-      ? String(channelFromClient).toUpperCase()
-      : '';
+    const rawChannelFromBody = channelFromClient ? String(channelFromClient).toUpperCase() : "";
+    const rawChannelFromQuery = req.query.channel ? String(req.query.channel).toUpperCase() : "";
 
-    const rawChannelFromQuery = req.query.channel
-      ? String(req.query.channel).toUpperCase()
-      : '';
+    let channel: Channel = "POS";
+    if (rawChannelFromBody === "CALLCENTER" || rawChannelFromQuery === "CALLCENTER") channel = "CallCenter";
+    else channel = "POS";
 
-    let channel: Channel = 'POS';
-    if (
-      rawChannelFromBody === 'CALLCENTER' ||
-      rawChannelFromQuery === 'CALLCENTER'
-    ) {
-      channel = 'CallCenter';
-    } else {
-      channel = 'POS';
-    }
-
-    console.log('✅ RESOLVED CHANNEL:', channel);
+    console.log("✅ RESOLVED CHANNEL:", channel);
 
     if (!items || !Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({ error: 'Order must have items' });
+      return res.status(400).json({ error: "Order must have items" });
     }
 
-    if (status === 'CLOSED') {
+    if (status === "CLOSED") {
       if (!payments || !Array.isArray(payments) || payments.length === 0) {
-        return res
-          .status(400)
-          .json({ error: 'Closed orders must have at least one payment' });
+        return res.status(400).json({ error: "Closed orders must have at least one payment" });
       }
     }
 
@@ -476,95 +494,54 @@ router.post('/orders', async (req: AuthedRequest, res: Response) => {
     const candidateBranchId = branchIdFromBody || branchIdFromQuery;
 
     if (candidateBranchId) {
-      const byId = await prisma.branch.findUnique({
-        where: { id: candidateBranchId },
-      });
-      if (byId) {
-        branchId = byId.id;
-      } else {
-        console.warn(
-          '⚠️ POST /pos/orders: Provided branchId not found:',
-          candidateBranchId,
-        );
-      }
+      const byId = await prisma.branch.findUnique({ where: { id: candidateBranchId } });
+      if (byId) branchId = byId.id;
+      else console.warn("⚠️ POST /pos/orders: Provided branchId not found:", candidateBranchId);
     }
 
     if (!branchId && branchName) {
-      const byName = await prisma.branch.findFirst({
-        where: { name: branchName },
-      });
-      if (byName) {
-        branchId = byName.id;
-      } else {
-        console.warn(
-          '⚠️ POST /pos/orders: Provided branchName not found:',
-          branchName,
-        );
-      }
+      const byName = await prisma.branch.findFirst({ where: { name: branchName } });
+      if (byName) branchId = byName.id;
+      else console.warn("⚠️ POST /pos/orders: Provided branchName not found:", branchName);
     }
 
     if (!branchId) {
       const anyBranch = await prisma.branch.findFirst();
-      if (!anyBranch) {
-        return res
-          .status(400)
-          .json({ error: 'No branch found to attach order to' });
-      }
+      if (!anyBranch) return res.status(400).json({ error: "No branch found to attach order to" });
       branchId = anyBranch.id;
-      console.warn(
-        '⚠️ POST /pos/orders: Falling back to first branch in DB, id=',
-        branchId,
-      );
+      console.warn("⚠️ POST /pos/orders: Falling back to first branch in DB, id=", branchId);
     }
 
-    console.log('✅ RESOLVED BRANCH:', {
-      branchId,
-      branchIdFromBody,
-      branchIdFromQuery,
-      branchName,
-    });
+    console.log("✅ RESOLVED BRANCH:", { branchId, branchIdFromBody, branchIdFromQuery, branchName });
 
-    const prefix = channel === 'CallCenter' ? 'CC' : 'POS';
+    const prefix = channel === "CallCenter" ? "CC" : "POS";
     const orderNo = `${prefix}-${Date.now()}`;
-
     const now = new Date();
     const businessDate = now;
 
     let ratePercent: number;
-    if (typeof vatRate === 'number' && vatRate > 0) {
-      ratePercent = vatRate;
-    } else {
-      ratePercent = await getVatPercentFromDb();
-    }
+    if (typeof vatRate === "number" && vatRate > 0) ratePercent = vatRate;
+    else ratePercent = await getVatPercentFromDb();
+
     const vatFraction = ratePercent / 100;
 
-    // 🔹 Compute discountTotal + kind + value for DB
-    const topLevelAmount =
-      typeof discountAmount === 'number' ? discountAmount : 0;
-    const nestedAmount =
-      discount && typeof discount.amount === 'number' ? discount.amount : 0;
+    const topLevelAmount = typeof discountAmount === "number" ? discountAmount : 0;
+    const nestedAmount = discount && typeof discount.amount === "number" ? discount.amount : 0;
 
-    const discountTotalValue =
-      topLevelAmount > 0
-        ? topLevelAmount
-        : nestedAmount > 0
-        ? nestedAmount
-        : 0;
+    const discountTotalValue = topLevelAmount > 0 ? topLevelAmount : nestedAmount > 0 ? nestedAmount : 0;
 
     let discountKindForDb: DiscountType | null = null;
     let discountValueForDb: Prisma.Decimal | null = null;
 
     if (discount && discount.kind && discount.value != null) {
       const kindUpper = String(discount.kind).toUpperCase();
-      if (kindUpper === 'PERCENT' || kindUpper === 'PERCENTAGE') {
-        discountKindForDb = DiscountType.PERCENTAGE;
-      } else {
-        discountKindForDb = DiscountType.FIXED;
-      }
+      if (kindUpper === "PERCENT" || kindUpper === "PERCENTAGE") discountKindForDb = DiscountType.PERCENTAGE;
+      else discountKindForDb = DiscountType.FIXED;
+
       discountValueForDb = new Prisma.Decimal(Number(discount.value) || 0);
     }
 
-    console.log('💸 /pos/orders discount debug', {
+    console.log("💸 /pos/orders discount debug", {
       discountAmount,
       discountFromObj: discount?.amount,
       discountTotalValue,
@@ -613,12 +590,12 @@ router.post('/orders', async (req: AuthedRequest, res: Response) => {
     });
 
     const paymentCreates =
-      status === 'CLOSED' && Array.isArray(payments)
+      status === "CLOSED" && Array.isArray(payments)
         ? (payments as any[]).map((p) => ({
             brandId,
             deviceId,
             paymentMethodId: p.methodId ? String(p.methodId) : null,
-            method: String(p.methodName ?? p.method ?? 'UNKNOWN'),
+            method: String(p.methodName ?? p.method ?? "UNKNOWN"),
             amount: Number(p.amount),
           }))
         : [];
@@ -626,7 +603,6 @@ router.post('/orders', async (req: AuthedRequest, res: Response) => {
     const orderTypeEnum = mapOrderTypeLabel(orderType);
 
     const orderData: any = {
-      // ✅ REQUIRED relations
       brandId,
       deviceId,
 
@@ -637,7 +613,6 @@ router.post('/orders', async (req: AuthedRequest, res: Response) => {
       status,
       subtotal: subtotalEx,
 
-      // ⬇️ discount meta
       discountTotal: new Prisma.Decimal(discountTotalValue || 0),
       discountKind: discountKindForDb ?? undefined,
       discountValue: discountValueForDb ?? undefined,
@@ -646,57 +621,35 @@ router.post('/orders', async (req: AuthedRequest, res: Response) => {
       netTotal: total,
       orderType: orderTypeEnum,
 
-      // customer
-      customerId:
-        typeof customerId === 'string' && customerId.trim()
-          ? customerId
-          : null,
+      customerId: typeof customerId === "string" && customerId.trim() ? customerId : null,
 
-      ...(status === 'CLOSED' ? { closedAt: now } : {}),
-      ...(status === 'VOID' ? { voidedAt: now } : {}),
+      ...(status === "CLOSED" ? { closedAt: now } : {}),
+      ...(status === "VOID" ? { voidedAt: now } : {}),
 
       items: { create: itemCreates },
     };
 
-    if (paymentCreates.length > 0) {
-      orderData.payments = { create: paymentCreates };
-    }
+    if (paymentCreates.length > 0) orderData.payments = { create: paymentCreates };
 
     const order = await prisma.order.create({
       data: orderData,
-      include: {
-        items: true,
-        payments: true,
-      },
+      include: { items: true, payments: true },
     });
 
-    console.log(
-      '✅ Order saved:',
-      'id =',
-      order.id,
-      'orderNo =',
-      order.orderNo,
-      'status =',
-      order.status,
-      'channel =',
-      order.channel,
-      'branchId =',
-      order.branchId,
-      'orderType =',
-      order.orderType,
-      'customerId =',
-      order.customerId,
-      'brandId =',
-      (order as any).brandId,
-      'deviceId =',
-      (order as any).deviceId,
-      'discountTotal =',
-      (order as any).discountTotal?.toString?.() ?? (order as any).discountTotal,
-      'discountKind =',
-      (order as any).discountKind,
-      'discountValue =',
-      (order as any).discountValue?.toString?.() ?? (order as any).discountValue,
-    );
+    console.log("✅ Order saved:", {
+      id: order.id,
+      orderNo: order.orderNo,
+      status: order.status,
+      channel: order.channel,
+      branchId: order.branchId,
+      orderType: order.orderType,
+      customerId: order.customerId,
+      brandId: (order as any).brandId,
+      deviceId: (order as any).deviceId,
+      discountTotal: (order as any).discountTotal?.toString?.() ?? (order as any).discountTotal,
+      discountKind: (order as any).discountKind,
+      discountValue: (order as any).discountValue?.toString?.() ?? (order as any).discountValue,
+    });
 
     return res.status(201).json({
       ok: true,
@@ -709,10 +662,8 @@ router.post('/orders', async (req: AuthedRequest, res: Response) => {
       deviceId: (order as any).deviceId,
     });
   } catch (err) {
-    console.error('POST /pos/orders ERROR', err);
-    return res
-      .status(500)
-      .json({ error: 'Failed to create order', details: String(err) });
+    console.error("POST /pos/orders ERROR", err);
+    return res.status(500).json({ error: "Failed to create order", details: String(err) });
   }
 });
 

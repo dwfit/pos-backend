@@ -38,7 +38,7 @@ function buildUrl(path: string) {
 function getSelectedBrandId(): string {
   if (typeof window === "undefined") return "ALL";
 
-  // You already store this in layout.tsx
+  // stored in layout.tsx
   const fromStorage = localStorage.getItem("selectedBrandId");
   if (fromStorage && fromStorage.trim()) return fromStorage.trim();
 
@@ -54,7 +54,6 @@ function addBrandIdToUrl(url: string, brandId: string): string {
   if (url.includes("brandId=")) return url;
 
   // build URL safely whether input is absolute or relative
-  // Note: buildUrl will turn relative to absolute on your API domain
   const absolute = /^https?:\/\//i.test(url) ? url : buildUrl(url);
   const u = new URL(absolute);
 
@@ -81,12 +80,27 @@ function shouldAttachBrandId(path: string, method: string): boolean {
 }
 
 // -------------------------
+// Token resolver (supports multiple keys)
+// -------------------------
+function resolveAccessToken(): string | null {
+  return (
+    getToken("accessToken") ||
+    getToken("token") ||
+    getToken("pos_token") ||
+    getToken("access_token")
+  );
+}
+
+// -------------------------
 // Force logout + redirect
 // -------------------------
 async function forceLogoutAndRedirect(reason = "sessionExpired") {
-  // Clear local tokens (you use Authorization Bearer accessToken)
+  // Clear local tokens (support all keys used in your project)
   setToken("accessToken", null);
   setToken("refreshToken", null);
+  setToken("token", null);
+  setToken("pos_token", null);
+  setToken("access_token", null);
 
   // Ask backend to clear cookies too (safe even if you don't rely on cookies)
   try {
@@ -122,7 +136,7 @@ export async function apiFetch<T = any>(
   path: string,
   options: RequestInit = {}
 ): Promise<T> {
-  const accessToken = getToken("accessToken");
+  const accessToken = resolveAccessToken();
   const method = (options.method || "GET").toUpperCase();
 
   // ✅ Inject brandId automatically (dynamic)
@@ -132,16 +146,28 @@ export async function apiFetch<T = any>(
     finalPath = addBrandIdToUrl(path, brandId);
   }
 
+  // Build headers safely:
+  // - If caller passed FormData, they must set their own headers (we won't force content-type)
+  const isFormData =
+    typeof FormData !== "undefined" && options.body instanceof FormData;
+
+  const headers: Record<string, string> = {
+    ...(options.headers as any),
+    ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
+  };
+
+  // default JSON content-type (only if not FormData and not already set)
+  if (!isFormData) {
+    const hasCt =
+      Object.keys(headers).some((k) => k.toLowerCase() === "content-type");
+    if (!hasCt) headers["Content-Type"] = "application/json";
+  }
+
   const resp = await fetch(buildUrl(finalPath), {
     ...options,
     method,
     credentials: "include", // keep cookies working too
-    headers: {
-      ...(options.headers || {}),
-      // keep your default
-      "Content-Type": "application/json",
-      ...(accessToken ? { Authorization: `Bearer ${accessToken}` } : {}),
-    },
+    headers,
   });
 
   // Handle 401 -> force logout
@@ -149,8 +175,10 @@ export async function apiFetch<T = any>(
     let data: any = null;
     try {
       data = await resp.clone().json();
+      // eslint-disable-next-line no-console
       console.log("apiFetch 401 body", data);
     } catch {
+      // eslint-disable-next-line no-console
       console.log("apiFetch 401 body (non-JSON)");
     }
 
@@ -160,9 +188,11 @@ export async function apiFetch<T = any>(
       data?.code === "UNAUTHENTICATED" ||
       data?.error === "UNAUTHENTICATED" ||
       data?.code === "INVALID_TOKEN" ||
-      data?.error === "INVALID_TOKEN";
+      data?.error === "INVALID_TOKEN" ||
+      // many JWT middlewares return this shape:
+      data?.message?.toLowerCase?.().includes("jwt") ||
+      data?.message?.toLowerCase?.().includes("expired");
 
-    // Always redirect to login on 401, but keep reason meaningful
     await forceLogoutAndRedirect(
       isSessionProblem ? "sessionExpired" : "unauthorized"
     );
@@ -202,7 +232,7 @@ export async function apiFetchRaw(
   path: string,
   options: RequestInit = {}
 ): Promise<Response> {
-  const accessToken = getToken("accessToken");
+  const accessToken = resolveAccessToken();
   const method = (options.method || "GET").toUpperCase();
 
   // ✅ Inject brandId automatically for GET (raw too)
@@ -244,6 +274,13 @@ export function del<T = any>(path: string) {
 export function put<T = any>(path: string, body?: any) {
   return apiFetch<T>(path, {
     method: "PUT",
+    body: JSON.stringify(body ?? {}),
+  });
+}
+
+export function patch<T = any>(path: string, body?: any) {
+  return apiFetch<T>(path, {
+    method: "PATCH",
     body: JSON.stringify(body ?? {}),
   });
 }

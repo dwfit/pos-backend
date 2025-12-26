@@ -20,6 +20,7 @@ import authRoutes from './routes/auth';
 import deviceRoutes from './routes/devices';
 import branchRoutes from './routes/branches';
 import menuRoutes from './routes/menu';
+import pricingRoutes from "./routes/pricing";
 import orderRoutes from './routes/orders';
 import { initWebSocket } from './ws';
 import dashRoutes from './routes/dash';
@@ -147,6 +148,7 @@ console.log(
   (branchRoutes as any)?.stack?.map((l: any) => l?.route && `${Object.keys(l.route.methods).join(",").toUpperCase()} ${l.route.path}`).filter(Boolean)
 );
   app.use('/menu', menuRoutes);
+  app.use("/pricing", pricingRoutes);
   app.use('/orders', orderRoutes);
   app.use('/dash', dashRoutes);
   app.use('/api/callcenter', callcenterRoutes);

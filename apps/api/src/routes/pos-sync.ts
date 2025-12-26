@@ -1,142 +1,176 @@
 // apps/api/src/routes/pos-sync.ts
-import { Router } from 'express';
-import { prisma } from '../db';
+import { Router } from "express";
+import { prisma } from "../db";
 
 const router = Router();
 
 /**
- * GET /menu  (mounted under /pos/sync)
+ * GET /pos/sync/menu
  *
- * Mobile calls this after activation to pull menu data into SQLite.
- * Full path: /pos/sync/menu
+ * ✅ REQUIRED: brandId
+ * ?brandId=BRAND_ID
  *
- * ?since=ISO_STRING  -> incremental sync, default 1970-01-01
+ * ?since=ISO_STRING            -> incremental sync, default 1970-01-01
+ * ?includeInactive=true|false  -> include inactive rows (default true)
+ * ?forceFull=true              -> ignore since, pull everything (default false)
  */
-router.get('/menu', async (req, res) => {
+router.get("/menu", async (req, res) => {
   try {
-    const sinceRaw = req.query.since as string | undefined;
+    const brandId =
+      typeof req.query.brandId === "string" ? req.query.brandId.trim() : "";
 
-    let since = new Date('1970-01-01T00:00:00.000Z');
-    if (sinceRaw) {
-      const d = new Date(sinceRaw);
-      if (!isNaN(d.getTime())) {
-        since = d;
-      }
+    if (!brandId) {
+      return res.status(400).json({ error: "brandId is required" });
     }
 
-    console.log('🔄 /pos/sync/menu since =', since.toISOString());
+    const includeInactive =
+      typeof req.query.includeInactive === "string"
+        ? req.query.includeInactive.toLowerCase() === "true"
+        : true;
 
-    const [
-      categoriesRaw,
-      productsRaw,
-      sizes,
-      modifierGroupsRaw,
-      modifierItemsRaw,
-    ] = await Promise.all([
-      // 1) Categories (have updatedAt)
-      prisma.category.findMany({
+    const forceFull =
+      typeof req.query.forceFull === "string"
+        ? req.query.forceFull.toLowerCase() === "true"
+        : false;
+
+    const sinceRaw = typeof req.query.since === "string" ? req.query.since : "";
+
+    let since = new Date("1970-01-01T00:00:00.000Z");
+    if (!forceFull && sinceRaw) {
+      const d = new Date(sinceRaw);
+      if (!isNaN(d.getTime())) since = d;
+    }
+
+    console.log("🔄 /pos/sync/menu", {
+      brandId,
+      includeInactive,
+      forceFull,
+      since: since.toISOString(),
+    });
+
+    const activeFilter = includeInactive ? {} : { isActive: true };
+    const updatedFilter = forceFull ? {} : { updatedAt: { gt: since } };
+
+    // 1) Categories
+    const categoriesPromise = prisma.category.findMany({
+      where: { brandId, ...activeFilter, ...updatedFilter },
+      select: {
+        id: true,
+        name: true,
+        imageUrl: true,
+        sort: true,
+        isActive: true,
+        updatedAt: true,
+      },
+      orderBy: [{ sort: "asc" }, { name: "asc" }],
+    });
+
+    // 2) Products
+    const productsPromise = prisma.product.findMany({
+      where: { brandId, ...activeFilter, ...updatedFilter },
+      select: {
+        id: true,
+        categoryId: true,
+        sku: true,
+        name: true,
+        imageUrl: true,
+        basePrice: true,
+        taxId: true,
+        taxRate: true,
+        isActive: true,
+        updatedAt: true,
+        tax: { select: { rate: true } },
+      },
+      orderBy: [{ name: "asc" }],
+    });
+
+    // 3) Modifier groups
+    const modifierGroupsPromise = prisma.modifierGroup.findMany({
+      where: { brandId, ...activeFilter, ...updatedFilter },
+      select: {
+        id: true,
+        name: true,
+        min: true,
+        max: true,
+        isActive: true,
+        updatedAt: true,
+      },
+      orderBy: [{ name: "asc" }],
+    });
+
+    // Run main pulls first
+    const [categoriesRaw, productsRaw, modifierGroupsRaw] = await Promise.all([
+      categoriesPromise,
+      productsPromise,
+      modifierGroupsPromise,
+    ]);
+
+    // 4) Product sizes (safe scoping)
+    let sizes: any[] = [];
+    try {
+      // works if ProductSize has `product` relation
+      sizes = await prisma.productSize.findMany({
         where: {
-          updatedAt: {
-            gt: since,
-          },
-        },
+          product: { brandId },
+        } as any,
         select: {
           id: true,
+          productId: true,
           name: true,
-          imageUrl: true,
-          sort: true,
-          isActive: true,
-          updatedAt: true,
+          price: true,
+          code: true, // keep if exists on ProductSize (you had it before)
         },
-        orderBy: [{ sort: 'asc' }, { name: 'asc' }],
-      }),
-
-      // 2) Products (have updatedAt)
-      prisma.product.findMany({
+        orderBy: [{ name: "asc" }],
+      });
+    } catch (e) {
+      // fallback if `product` relation doesn't exist
+      const productIds = productsRaw.map((p) => p.id);
+      sizes = await prisma.productSize.findMany({
         where: {
-          updatedAt: {
-            gt: since,
-          },
-        },
-        select: {
-          id: true,
-          categoryId: true,
-          sku: true,
-          name: true,
-          imageUrl: true,
-          basePrice: true,
-          taxId: true,
-          taxRate: true, 
-          isActive: true,
-          updatedAt: true,
-          tax: {
-            select: {
-              rate: true,
-            },
-          },
-        },
-        orderBy: [{ name: 'asc' }],
-      }),
-
-      
-      prisma.productSize.findMany({
+          productId: { in: productIds.length ? productIds : ["__none__"] },
+        } as any,
         select: {
           id: true,
           productId: true,
           name: true,
           price: true,
           code: true,
-          
         },
-        orderBy: [{ name: 'asc' }],
-      }),
+        orderBy: [{ name: "asc" }],
+      });
+    }
 
-      
-      prisma.modifierGroup.findMany({
-        where: {
-          updatedAt: {
-            gt: since,
-          },
-        },
-        select: {
-          id: true,
-          name: true,
-          min: true,
-          max: true,
-          isActive: true,
-          updatedAt: true,
-        },
-        orderBy: [{ name: 'asc' }],
-      }),
+    // 5) Modifier items (scoped by groupId list — NO relation names)
+    const groupIds = modifierGroupsRaw.map((g: any) => g.id);
 
-      
-      prisma.modifierItem.findMany({
-        where: {
-          updatedAt: {
-            gt: since,
-          },
-        },
-        select: {
-          id: true,
-          groupId: true,
-          name: true,
-          price: true,
-          code: true,
-          isActive: true,
-          updatedAt: true,
-        },
-        orderBy: [{ name: 'asc' }],
-      }),
-    ]);
+    const modifierItemsRaw =
+      groupIds.length === 0
+        ? []
+        : await prisma.modifierItem.findMany({
+            where: {
+              groupId: { in: groupIds },
+              ...(includeInactive ? {} : { isActive: true }),
+              ...(forceFull ? {} : { updatedAt: { gt: since } }),
+            },
+            select: {
+              id: true,
+              groupId: true,
+              name: true,
+              price: true,
+              // ❌ DO NOT SELECT `code` (it doesn't exist in your schema)
+              isActive: true,
+              updatedAt: true,
+            },
+            orderBy: [{ name: "asc" }],
+          });
 
-   
-
+    // Map payloads
     const categories = categoriesRaw.map((c) => ({
       id: c.id,
       name: c.name,
-      imageUrl: c.imageUrl,
-      sort: c.sort,
-      isActive: c.isActive,
+      imageUrl: c.imageUrl ?? null,
+      sort: c.sort ?? 0,
+      isActive: !!c.isActive,
       updatedAt: c.updatedAt,
     }));
 
@@ -145,56 +179,68 @@ router.get('/menu', async (req, res) => {
       categoryId: p.categoryId,
       sku: p.sku,
       name: p.name,
-      imageUrl: p.imageUrl,
-      basePrice: p.basePrice,
-      // Prefer relational tax.rate; fallback to legacy product.taxRate
-      taxId: p.taxId,
+      imageUrl: p.imageUrl ?? null,
+      basePrice: p.basePrice ?? 0,
+      taxId: p.taxId ?? null,
       taxRate: p.tax
         ? Number(p.tax.rate)
         : p.taxRate != null
         ? Number(p.taxRate)
         : 0,
-      isActive: p.isActive,
+      isActive: !!p.isActive,
       updatedAt: p.updatedAt,
     }));
 
     const modifierGroups = modifierGroupsRaw.map((g) => {
       const min = g.min ?? 0;
       const max = g.max ?? 0;
-
       return {
         id: g.id,
         name: g.name,
-        
         minSelect: min,
         maxSelect: max,
         isRequired: min > 0,
-        isActive: g.isActive,
+        isActive: !!g.isActive,
         updatedAt: g.updatedAt,
       };
     });
 
-    const modifierItems = modifierItemsRaw.map((m) => ({
+    const modifierItems = modifierItemsRaw.map((m: any) => ({
       id: m.id,
       groupId: m.groupId,
       name: m.name,
-      price: m.price,
-      code: m.code,
-      isActive: m.isActive,
+      price: m.price ?? 0,
+      // ✅ keep field for app compatibility, but null
+      code: null,
+      isActive: !!m.isActive,
       updatedAt: m.updatedAt,
     }));
 
+    console.log("✅ /pos/sync/menu counts", {
+      categories: categories.length,
+      products: products.length,
+      sizes: sizes.length,
+      modifierGroups: modifierGroups.length,
+      modifierItems: modifierItems.length,
+    });
+
     return res.json({
       since: since.toISOString(),
+      brandId,
+      includeInactive,
+      forceFull,
       categories,
       products,
       sizes,
       modifierGroups,
       modifierItems,
     });
-  } catch (err) {
-    console.error('GET /pos/sync/menu ERROR:', err);
-    return res.status(500).json({ error: 'menu_sync_failed' });
+  } catch (err: any) {
+    console.error("GET /pos/sync/menu ERROR:", err);
+    return res.status(500).json({
+      error: "menu_sync_failed",
+      message: err?.message ? String(err.message) : String(err),
+    });
   }
 });
 
