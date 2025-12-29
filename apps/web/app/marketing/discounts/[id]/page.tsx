@@ -48,7 +48,7 @@ async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
     cache: "no-store",
   });
 
-  // ✅ central 401 handling (same as other pages)
+  // ✅ central 401 handling
   if (res.status === 401) {
     authStore.expire("Session expired. Please log in again.");
     throw new Error("Unauthorized (401). Please login again.");
@@ -83,6 +83,7 @@ type OrderType = "DINE_IN" | "PICKUP" | "DELIVERY" | "DRIVE_THRU";
 
 type Discount = {
   id: string;
+  brandId?: string | null;
   name: string;
   nameLocalized?: string | null;
   qualification: DiscountQualification;
@@ -92,13 +93,12 @@ type Discount = {
   taxable: boolean;
   maxDiscount?: number | null;
   minProductPrice?: number | null;
-  orderTypes?: string | null; // CSV from backend
+  orderTypes?: string | null;
   applyAllBranches?: boolean;
-  // optional target id arrays if backend returns them
   branchIds?: string[];
   categoryIds?: string[];
-  productIds?: string[]; // legacy / helper
-  productSizeIds?: string[]; // main source of truth for sizes
+  productIds?: string[];
+  productSizeIds?: string[];
 };
 
 type Branch = {
@@ -116,9 +116,9 @@ type Category = {
 
 // In flatSizes mode this represents a "Product + Size" row (id = ProductSize.id)
 type Product = {
-  id: string; // ProductSize.id
+  id: string;
   name: string; // e.g. "Apple - Small"
-  code?: string | null; // size code or SKU
+  code?: string | null;
   isActive?: boolean;
 };
 
@@ -158,7 +158,12 @@ function orderTypeLabel(o: OrderType) {
   }
 }
 
-const ALL_ORDER_TYPES: OrderType[] = ["DINE_IN", "PICKUP", "DELIVERY", "DRIVE_THRU"];
+const ALL_ORDER_TYPES: OrderType[] = [
+  "DINE_IN",
+  "PICKUP",
+  "DELIVERY",
+  "DRIVE_THRU",
+];
 
 function parseOrderTypes(csv: string | null | undefined): OrderType[] {
   if (!csv) return [];
@@ -166,6 +171,94 @@ function parseOrderTypes(csv: string | null | undefined): OrderType[] {
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean) as OrderType[];
+}
+
+/**
+ * Try to read a brandId from authStore or localStorage.
+ */
+function getBrandIdFromHeaderOrLocal(): string | null {
+  let v: any = null;
+
+  // 1) authStore
+  try {
+    const state: any = authStore.getState?.() ?? {};
+    v =
+      state.currentBrandId ||
+      state.selectedBrandId ||
+      state.brandId ||
+      state.filterBrandId ||
+      null;
+  } catch (err) {
+    console.warn("getBrandIdFromHeaderOrLocal: cannot read authStore", err);
+  }
+
+  // 2) localStorage fallbacks
+  if (!v && typeof window !== "undefined") {
+    const keys = [
+      "brandId",
+      "currentBrandId",
+      "selectedBrandId",
+      "filterBrandId",
+      "brand_id",
+      "brand",
+    ];
+    for (const k of keys) {
+      try {
+        const val = window.localStorage.getItem(k);
+        if (val && val !== "all" && val !== "ALL") {
+          v = val;
+          break;
+        }
+      } catch {
+        // ignore
+      }
+    }
+  }
+
+  if (typeof v === "string" && v.trim() && v !== "all" && v !== "ALL") {
+    return v;
+  }
+  return null;
+}
+
+/**
+ * Resolve the brandId for this discount as best as we can:
+ * 1) discount.brandId from backend
+ * 2) header / localStorage
+ * 3) via a branch (branchIds[0] → /branches/:id → brandId)
+ */
+async function resolveBrandId(discount: Discount | null): Promise<string | null> {
+  if (!discount) return null;
+
+  if (discount.brandId) {
+    console.log("resolveBrandId: using discount.brandId =", discount.brandId);
+    return discount.brandId;
+  }
+
+  const fromHeader = getBrandIdFromHeaderOrLocal();
+  if (fromHeader) {
+    console.log("resolveBrandId: using header/localStorage brandId =", fromHeader);
+    return fromHeader;
+  }
+
+  if (discount.branchIds && discount.branchIds.length > 0) {
+    const firstBranchId = discount.branchIds[0];
+    try {
+      console.log("resolveBrandId: fetching branch", firstBranchId, "for brandId");
+      const branch: any = await fetchJson<any>(
+        `${API_BASE}/branches/${firstBranchId}`
+      );
+      if (branch?.brandId) {
+        console.log("resolveBrandId: got brandId from branch =", branch.brandId);
+        return branch.brandId as string;
+      }
+    } catch (err) {
+      console.warn("resolveBrandId: could not fetch branch", err);
+    }
+  }
+
+  console.warn("resolveBrandId: FAILED to determine brandId for discount", discount.id);
+  return null;
 }
 
 /* ----------------------------- main page ----------------------------- */
@@ -216,7 +309,6 @@ export default function DiscountDetailPage({
   const [products, setProducts] = useState<Product[]>([]);
   const [productsLoading, setProductsLoading] = useState(false);
   const [productSearch, setProductSearch] = useState("");
-  // IMPORTANT: these hold ProductSize IDs (matches backend DiscountProduct.productSizeId)
   const [selectedProductIds, setSelectedProductIds] = useState<string[]>([]);
 
   /* ------------------------ load discount detail ------------------------ */
@@ -228,29 +320,30 @@ export default function DiscountDetailPage({
     fetchJson<Discount>(`${API_BASE}/discounts/${id}`)
       .then((data) => {
         if (!mounted) return;
+        if (!data) throw new Error("Discount not found");
+
+        console.log("Loaded discount:", data);
         setDiscount(data);
 
         setApplyAllBranches(!!data.applyAllBranches);
-
-        // hydrate existing targets if backend returns them
         if (Array.isArray(data.branchIds)) setSelectedBranchIds(data.branchIds);
-        if (Array.isArray(data.categoryIds)) setSelectedCategoryIds(data.categoryIds);
+        if (Array.isArray(data.categoryIds))
+          setSelectedCategoryIds(data.categoryIds);
 
-        // ✅ productSizeIds are the main source of truth
         if (Array.isArray(data.productSizeIds) && data.productSizeIds.length) {
           setSelectedProductIds(data.productSizeIds);
         } else if (Array.isArray(data.productIds) && data.productIds.length) {
-          // fallback / backward compatibility
           setSelectedProductIds(data.productIds);
         }
 
-        // edit defaults
         setEditName(data.name ?? "");
         setEditNameLocalized(data.nameLocalized ?? "");
         setEditQualification(data.qualification);
         setEditType(data.type);
         setEditValue(String(data.value ?? 0));
-        setEditMaxDiscount(data.maxDiscount != null ? String(data.maxDiscount) : "");
+        setEditMaxDiscount(
+          data.maxDiscount != null ? String(data.maxDiscount) : ""
+        );
         setEditMinPrice(
           data.minProductPrice != null ? String(data.minProductPrice) : ""
         );
@@ -284,21 +377,27 @@ export default function DiscountDetailPage({
   async function handleSaveEdit(e: React.FormEvent) {
     e.preventDefault();
     if (!discount) return;
+
     if (!editName.trim()) {
       alert("Name is required");
       return;
     }
+
     const valueNum = parseFloat(editValue || "0");
     if (Number.isNaN(valueNum) || valueNum < 0) {
       alert("Discount amount must be a non-negative number");
       return;
     }
-    const maxNum = editMaxDiscount.trim() === "" ? undefined : Number(editMaxDiscount);
+
+    const maxNum =
+      editMaxDiscount.trim() === "" ? undefined : Number(editMaxDiscount);
     if (maxNum != null && (Number.isNaN(maxNum) || maxNum < 0)) {
       alert("Maximum discount must be a non-negative number");
       return;
     }
-    const minNum = editMinPrice.trim() === "" ? undefined : Number(editMinPrice);
+
+    const minNum =
+      editMinPrice.trim() === "" ? undefined : Number(editMinPrice);
     if (minNum != null && (Number.isNaN(minNum) || minNum < 0)) {
       alert("Minimum product price must be a non-negative number");
       return;
@@ -318,10 +417,13 @@ export default function DiscountDetailPage({
         orderTypes: editOrderTypes,
       };
 
-      const updated = await fetchJson<Discount>(`${API_BASE}/discounts/${discount.id}`, {
-        method: "PUT",
-        body: JSON.stringify(body),
-      });
+      const updated = await fetchJson<Discount>(
+        `${API_BASE}/discounts/${discount.id}`,
+        {
+          method: "PUT",
+          body: JSON.stringify(body),
+        }
+      );
 
       setDiscount(updated);
       setEditOpen(false);
@@ -335,7 +437,8 @@ export default function DiscountDetailPage({
 
   async function handleDelete() {
     if (!discount) return;
-    if (!window.confirm("Are you sure you want to delete this discount?")) return;
+    if (!window.confirm("Are you sure you want to delete this discount?"))
+      return;
 
     setDeleting(true);
     try {
@@ -398,13 +501,17 @@ export default function DiscountDetailPage({
         branchIds: applyAllBranches ? [] : selectedBranchIds,
       };
 
-      const updated = await fetchJson<Discount>(`${API_BASE}/discounts/${discount.id}/targets`, {
-        method: "PUT",
-        body: JSON.stringify(body),
-      });
+      const updated = await fetchJson<Discount>(
+        `${API_BASE}/discounts/${discount.id}/targets`,
+        {
+          method: "PUT",
+          body: JSON.stringify(body),
+        }
+      );
 
       setDiscount(updated);
-      if (Array.isArray(updated.branchIds)) setSelectedBranchIds(updated.branchIds);
+      if (Array.isArray(updated.branchIds))
+        setSelectedBranchIds(updated.branchIds);
       setApplyAllBranches(!!updated.applyAllBranches);
       setBranchesOpen(false);
     } catch (err: any) {
@@ -434,12 +541,29 @@ export default function DiscountDetailPage({
   }
 
   async function openCategoriesModal() {
+    if (!discount) return;
+
+    const brandId = await resolveBrandId(discount);
+    if (!brandId) {
+      alert(
+        "Cannot determine brand for categories. Please select a specific brand in the header (not 'All brands'), then reload this page."
+      );
+      return;
+    }
+
     setCategoriesOpen(true);
     if (categories.length > 0) return;
 
     setCategoriesLoading(true);
     try {
-      const data = await fetchJson<Category[]>(`${API_BASE}/menu/categories`);
+      const params = new URLSearchParams();
+      params.set("brandId", brandId);
+      params.set("includeInactive", "false");
+
+      const data = await fetchJson<Category[]>(
+        `${API_BASE}/menu/categories?${params.toString()}`
+      );
+
       setCategories((data || []).filter((c) => c.isActive !== false));
     } catch (err) {
       console.error("Load categories error", err);
@@ -466,13 +590,17 @@ export default function DiscountDetailPage({
         categoryIds: selectedCategoryIds,
       };
 
-      const updated = await fetchJson<Discount>(`${API_BASE}/discounts/${discount.id}/targets`, {
-        method: "PUT",
-        body: JSON.stringify(body),
-      });
+      const updated = await fetchJson<Discount>(
+        `${API_BASE}/discounts/${discount.id}/targets`,
+        {
+          method: "PUT",
+          body: JSON.stringify(body),
+        }
+      );
 
       setDiscount(updated);
-      if (Array.isArray(updated.categoryIds)) setSelectedCategoryIds(updated.categoryIds);
+      if (Array.isArray(updated.categoryIds))
+        setSelectedCategoryIds(updated.categoryIds);
       setCategoriesOpen(false);
     } catch (err: any) {
       console.error("Save categories error", err);
@@ -505,14 +633,30 @@ export default function DiscountDetailPage({
   }
 
   async function openProductsModal() {
+    if (!discount) return;
+
+    const brandId = await resolveBrandId(discount);
+    if (!brandId) {
+      alert(
+        "Cannot determine brand for products. Please select a specific brand in the header (not 'All brands'), then reload this page."
+      );
+      return;
+    }
+
     setProductsOpen(true);
     if (products.length > 0) return;
 
     setProductsLoading(true);
     try {
+      const params = new URLSearchParams();
+      params.set("brandId", brandId);
+      params.set("flatSizes", "1");
+      params.set("includeInactive", "false");
+
       const data = await fetchJson<Product[]>(
-        `${API_BASE}/menu/products?flatSizes=1&includeInactive=false`
+        `${API_BASE}/menu/products?${params.toString()}`
       );
+
       setProducts((data || []).filter((p) => p.isActive !== false));
     } catch (err) {
       console.error("Load products error", err);
@@ -536,21 +680,28 @@ export default function DiscountDetailPage({
     setSaving(true);
     try {
       const body = {
-        // ✅ send as productSizeIds because IDs are ProductSize.id
         productSizeIds: selectedProductIds,
       };
 
-      const updated = await fetchJson<Discount>(`${API_BASE}/discounts/${discount.id}/targets`, {
-        method: "PUT",
-        body: JSON.stringify(body),
-      });
+      const updated = await fetchJson<Discount>(
+        `${API_BASE}/discounts/${discount.id}/targets`,
+        {
+          method: "PUT",
+          body: JSON.stringify(body),
+        }
+      );
 
       setDiscount(updated);
 
-      // hydrate from updated response (prefer productSizeIds)
-      if (Array.isArray(updated.productSizeIds) && updated.productSizeIds.length) {
+      if (
+        Array.isArray(updated.productSizeIds) &&
+        updated.productSizeIds.length
+      ) {
         setSelectedProductIds(updated.productSizeIds);
-      } else if (Array.isArray(updated.productIds) && updated.productIds.length) {
+      } else if (
+        Array.isArray(updated.productIds) &&
+        updated.productIds.length
+      ) {
         setSelectedProductIds(updated.productIds);
       }
 
@@ -638,12 +789,16 @@ export default function DiscountDetailPage({
         <div className="grid grid-cols-1 gap-4 px-6 py-5 sm:grid-cols-2">
           <div className="space-y-1 text-xs">
             <div className="text-slate-500">Name</div>
-            <div className="font-medium text-slate-900">{discount?.name ?? "—"}</div>
+            <div className="font-medium text-slate-900">
+              {discount?.name ?? "—"}
+            </div>
           </div>
 
           <div className="space-y-1 text-xs">
             <div className="text-slate-500">Name Localized</div>
-            <div className="font-medium text-slate-900">{discount?.nameLocalized || "—"}</div>
+            <div className="font-medium text-slate-900">
+              {discount?.nameLocalized || "—"}
+            </div>
           </div>
 
           <div className="space-y-1 text-xs">
@@ -663,7 +818,9 @@ export default function DiscountDetailPage({
           <div className="space-y-1 text-xs">
             <div className="text-slate-500">Minimum Product Price</div>
             <div className="font-medium text-slate-900">
-              {discount?.minProductPrice != null ? discount.minProductPrice : "—"}
+              {discount?.minProductPrice != null
+                ? discount.minProductPrice
+                : "—"}
             </div>
           </div>
 
@@ -676,7 +833,9 @@ export default function DiscountDetailPage({
 
           <div className="space-y-1 text-xs">
             <div className="text-slate-500">Reference</div>
-            <div className="font-medium text-slate-900">{discount?.reference || "—"}</div>
+            <div className="font-medium text-slate-900">
+              {discount?.reference || "—"}
+            </div>
           </div>
 
           <div className="space-y-1 text-xs">
@@ -708,7 +867,9 @@ export default function DiscountDetailPage({
       {/* Applies on branches */}
       <section className="space-y-2">
         <div className="flex items-center justify-between">
-          <h2 className="text-xs font-semibold text-slate-800">Applies On Branches</h2>
+          <h2 className="text-xs font-semibold text-slate-800">
+            Applies On Branches
+          </h2>
           <button
             type="button"
             onClick={openBranchesModal}
@@ -726,7 +887,9 @@ export default function DiscountDetailPage({
       {/* Applies on categories */}
       <section className="space-y-2">
         <div className="flex items-center justify-between">
-          <h2 className="text-xs font-semibold text-slate-800">Applies On Categories</h2>
+          <h2 className="text-xs font-semibold text-slate-800">
+            Applies On Categories
+          </h2>
           <button
             type="button"
             onClick={openCategoriesModal}
@@ -744,7 +907,9 @@ export default function DiscountDetailPage({
       {/* Applies on product sizes */}
       <section className="space-y-2">
         <div className="flex items-center justify-between">
-          <h2 className="text-xs font-semibold text-slate-800">Applies On Product Sizes</h2>
+          <h2 className="text-xs font-semibold text-slate-800">
+            Applies On Product Sizes
+          </h2>
           <button
             type="button"
             onClick={openProductsModal}
@@ -766,7 +931,9 @@ export default function DiscountDetailPage({
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-md rounded-2xl bg-white shadow-xl">
             <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-              <h2 className="text-sm font-semibold text-slate-900">Edit Discount</h2>
+              <h2 className="text-sm font-semibold text-slate-900">
+                Edit Discount
+              </h2>
               <button
                 type="button"
                 className="inline-flex h-7 w-7 items-center justify-center rounded-full hover:bg-slate-100"
@@ -776,7 +943,10 @@ export default function DiscountDetailPage({
               </button>
             </div>
 
-            <form onSubmit={handleSaveEdit} className="space-y-3 px-4 py-4 text-xs">
+            <form
+              onSubmit={handleSaveEdit}
+              className="space-y-3 px-4 py-4 text-xs"
+            >
               {/* Name */}
               <div className="space-y-1">
                 <label className="block font-medium text-slate-700">
@@ -792,7 +962,9 @@ export default function DiscountDetailPage({
 
               {/* Name Localized */}
               <div className="space-y-1">
-                <label className="block font-medium text-slate-700">Name Localized</label>
+                <label className="block font-medium text-slate-700">
+                  Name Localized
+                </label>
                 <input
                   type="text"
                   value={editNameLocalized}
@@ -808,7 +980,9 @@ export default function DiscountDetailPage({
                 </label>
                 <select
                   value={editType}
-                  onChange={(e) => setEditType(e.target.value as DiscountType)}
+                  onChange={(e) =>
+                    setEditType(e.target.value as DiscountType)
+                  }
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs focus:border-slate-900 focus:outline-none"
                 >
                   <option value="PERCENTAGE">Percentage</option>
@@ -819,7 +993,8 @@ export default function DiscountDetailPage({
               {/* Discount Amount */}
               <div className="space-y-1">
                 <label className="block font-medium text-slate-700">
-                  Discount Amount{editType === "PERCENTAGE" ? " (%)" : ""}{" "}
+                  Discount Amount
+                  {editType === "PERCENTAGE" ? " (%)" : ""}{" "}
                   <span className="text-red-500">*</span>
                 </label>
                 <input
@@ -834,7 +1009,9 @@ export default function DiscountDetailPage({
 
               {/* Maximum Discount */}
               <div className="space-y-1">
-                <label className="block font-medium text-slate-700">Maximum Discount</label>
+                <label className="block font-medium text-slate-700">
+                  Maximum Discount
+                </label>
                 <input
                   type="number"
                   min={0}
@@ -847,7 +1024,9 @@ export default function DiscountDetailPage({
 
               {/* Minimum Product Price */}
               <div className="space-y-1">
-                <label className="block font-medium text-slate-700">Minimum Product Price</label>
+                <label className="block font-medium text-slate-700">
+                  Minimum Product Price
+                </label>
                 <input
                   type="number"
                   min={0}
@@ -860,11 +1039,15 @@ export default function DiscountDetailPage({
 
               {/* Qualification */}
               <div className="space-y-1">
-                <label className="block font-medium text-slate-700">Qualification</label>
+                <label className="block font-medium text-slate-700">
+                  Qualification
+                </label>
                 <select
                   value={editQualification}
                   onChange={(e) =>
-                    setEditQualification(e.target.value as DiscountQualification)
+                    setEditQualification(
+                      e.target.value as DiscountQualification
+                    )
                   }
                   className="w-full rounded-lg border border-slate-300 px-3 py-2 text-xs focus:border-slate-900 focus:outline-none"
                 >
@@ -876,7 +1059,9 @@ export default function DiscountDetailPage({
 
               {/* Order types */}
               <div className="space-y-1">
-                <label className="block font-medium text-slate-700">Applies On Order Types</label>
+                <label className="block font-medium text-slate-700">
+                  Applies On Order Types
+                </label>
                 <div className="flex flex-wrap gap-2">
                   {ALL_ORDER_TYPES.map((o) => {
                     const active = editOrderTypes.includes(o);
@@ -907,7 +1092,10 @@ export default function DiscountDetailPage({
                   onChange={(e) => setEditTaxable(e.target.checked)}
                   className="h-3 w-3 rounded border-slate-300"
                 />
-                <label htmlFor="edit-taxable" className="text-xs text-slate-700">
+                <label
+                  htmlFor="edit-taxable"
+                  className="text-xs text-slate-700"
+                >
                   Taxable
                 </label>
               </div>
@@ -949,7 +1137,9 @@ export default function DiscountDetailPage({
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-md rounded-2xl bg-white shadow-xl">
             <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-              <h2 className="text-sm font-semibold text-slate-900">Applies On Branches</h2>
+              <h2 className="text-sm font-semibold text-slate-900">
+                Applies On Branches
+              </h2>
               <button
                 type="button"
                 className="inline-flex h-7 w-7 items-center justify-center rounded-full hover:bg-slate-100"
@@ -969,7 +1159,9 @@ export default function DiscountDetailPage({
                     onChange={() => setApplyAllBranches(true)}
                     className="h-3 w-3"
                   />
-                  <span>Automatically apply on all existing and new branches</span>
+                  <span>
+                    Automatically apply on all existing and new branches
+                  </span>
                 </label>
 
                 <label className="flex items-center gap-2">
@@ -1004,18 +1196,24 @@ export default function DiscountDetailPage({
                         const selected = selectedBranchIds.includes(b.id);
                         const label =
                           (b.name || "") +
-                          (b.reference || b.code ? ` (${b.reference || b.code})` : "");
+                          (b.reference || b.code
+                            ? ` (${b.reference || b.code})`
+                            : "");
                         return (
                           <button
                             key={b.id}
                             type="button"
                             onClick={() => toggleBranch(b.id)}
                             className={`flex w-full items-center justify-between px-3 py-2 text-left text-[11px] ${
-                              selected ? "bg-black text-white" : "hover:bg-slate-50"
+                              selected
+                                ? "bg-black text-white"
+                                : "hover:bg-slate-50"
                             }`}
                           >
                             <span>{label}</span>
-                            {selected && <span className="text-[10px]">Selected</span>}
+                            {selected && (
+                              <span className="text-[10px]">Selected</span>
+                            )}
                           </button>
                         );
                       })}
@@ -1055,7 +1253,9 @@ export default function DiscountDetailPage({
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-md rounded-2xl bg-white shadow-xl">
             <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-              <h2 className="text-sm font-semibold text-slate-900">Edit Categories</h2>
+              <h2 className="text-sm font-semibold text-slate-900">
+                Edit Categories
+              </h2>
               <button
                 type="button"
                 className="inline-flex h-7 w-7 items-center justify-center rounded-full hover:bg-slate-100"
@@ -1097,11 +1297,15 @@ export default function DiscountDetailPage({
                         type="button"
                         onClick={() => toggleCategory(c.id)}
                         className={`flex w-full items-center justify-between px-3 py-2 text-left text-[11px] ${
-                          selected ? "bg-black text-white" : "hover:bg-slate-50"
+                          selected
+                            ? "bg-black text-white"
+                            : "hover:bg-slate-50"
                         }`}
                       >
                         <span>{c.name}</span>
-                        {selected && <span className="text-[10px]">Selected</span>}
+                        {selected && (
+                          <span className="text-[10px]">Selected</span>
+                        )}
                       </button>
                     );
                   })}
@@ -1139,7 +1343,9 @@ export default function DiscountDetailPage({
         <div className="fixed inset-0 z-40 flex items-center justify-center bg-black/40 p-4">
           <div className="w-full max-w-md rounded-2xl bg-white shadow-xl">
             <div className="flex items-center justify-between border-b border-slate-200 px-4 py-3">
-              <h2 className="text-sm font-semibold text-slate-900">Edit Product Sizes</h2>
+              <h2 className="text-sm font-semibold text-slate-900">
+                Edit Product Sizes
+              </h2>
               <button
                 type="button"
                 className="inline-flex h-7 w-7 items-center justify-center rounded-full hover:bg-slate-100"
@@ -1182,11 +1388,15 @@ export default function DiscountDetailPage({
                         type="button"
                         onClick={() => toggleProduct(p.id)}
                         className={`flex w-full items-center justify-between px-3 py-2 text-left text-[11px] ${
-                          selected ? "bg-black text-white" : "hover:bg-slate-50"
+                          selected
+                            ? "bg-black text-white"
+                            : "hover:bg-slate-50"
                         }`}
                       >
                         <span>{label}</span>
-                        {selected && <span className="text-[10px]">Selected</span>}
+                        {selected && (
+                          <span className="text-[10px]">Selected</span>
+                        )}
                       </button>
                     );
                   })}
