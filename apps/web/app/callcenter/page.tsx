@@ -2,6 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { ShoppingCart, X, Send } from "lucide-react";
+import { authStore } from "@/lib/auth-store";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:4000";
 
@@ -60,11 +61,18 @@ type Branch = {
 /* --------------------------- Helpers ----------------------------- */
 function getToken() {
   if (typeof window === "undefined") return "";
-  return (
+
+  // 1) Primary: what authStore is currently holding
+  const storeToken = authStore.getState().token || authStore.getState().posToken || "";
+
+  // 2) Fallbacks: direct localStorage keys, in case something wrote them there
+  const lsToken =
     localStorage.getItem("token") ||
     localStorage.getItem("pos_token") ||
-    ""
-  );
+    localStorage.getItem("accessToken") || // extra safety
+    "";
+
+  return storeToken || lsToken;
 }
 
 async function fetchJson<T>(
@@ -73,6 +81,9 @@ async function fetchJson<T>(
   signal?: AbortSignal
 ): Promise<T> {
   const token = getToken();
+
+  // 🔍 temporary debug – REMOVE when it’s working
+  console.log("🔐 Callcenter fetch:", input, "token prefix:", token?.slice(0, 16));
 
   const res = await fetch(input, {
     ...init,
@@ -91,7 +102,6 @@ async function fetchJson<T>(
   }
   return res.json();
 }
-
 
 /** Try multiple paths, accept array | {items} | {data} */
 async function fetchListAnyShape<T>(paths: string[], signal?: AbortSignal): Promise<T[]> {
@@ -205,35 +215,51 @@ export default function CallCenter() {
   }
 
   /* ------------------ Load categories/products/mods ------------------ */
-  useEffect(() => {
-    const ac = new AbortController();
-    (async () => {
-      try {
-        const [cData, pData, mData] = await Promise.all([
-          fetchListAnyShape<Category>(["/api/menu/categories"], ac.signal),
-          fetchListAnyShape<Product>(["/api/menu/products"], ac.signal),
-          fetchListAnyShape<ModifierGroup>(["/api/menu/modifiers"], ac.signal),
-        ]);
+useEffect(() => {
+  // 🧠 If no brand selected yet -> clear menu & don't call API
+  if (!brandId) {
+    setCats([]);
+    setProducts([]);
+    setMods([]);
+    setActiveCat(null);
+    return;
+  }
 
-        const activeCats = (cData || [])
-          .map((c) => ({ ...c, sort: Number.isFinite(c.sort as any) ? c.sort : 0 }))
-          .filter((c) => c.isActive)
-          .sort((a, b) => a.sort - b.sort || a.name.localeCompare(b.name));
+  const ac = new AbortController();
 
-        setCats(activeCats);
-        setActiveCat(activeCats[0]?.id ?? null);
+  (async () => {
+    try {
+      const qs = `?brandId=${encodeURIComponent(brandId)}`;
 
-        setProducts((pData || []).filter((p) => p.isActive));
-        setMods(mData || []);
-      } catch (err) {
-        console.error("Menu load failed:", err);
-        setCats([]);
-        setProducts([]);
-        setMods([]);
-      }
-    })();
-    return () => ac.abort();
-  }, []);
+      const [cData, pData, mData] = await Promise.all([
+        fetchListAnyShape<Category>([`/api/menu/categories${qs}`], ac.signal),
+        fetchListAnyShape<Product>([`/api/menu/products${qs}`], ac.signal),
+        fetchListAnyShape<ModifierGroup>([`/api/menu/modifiers${qs}`], ac.signal),
+      ]);
+
+      const activeCats = (cData || [])
+        .map((c) => ({ ...c, sort: Number.isFinite((c as any).sort) ? (c as any).sort : 0 }))
+        .filter((c) => c.isActive)
+        .sort((a, b) => a.sort - b.sort || a.name.localeCompare(b.name));
+
+      setCats(activeCats);
+      setActiveCat(activeCats[0]?.id ?? null);
+
+      setProducts((pData || []).filter((p) => p.isActive));
+      setMods(mData || []);
+    } catch (err: any) {
+      // Ignore abort noise from Strict Mode / unmounts
+      if (err?.name === "AbortError" || String(err?.message || "").includes("aborted")) return;
+
+      console.error("Menu load failed:", err);
+      setCats([]);
+      setProducts([]);
+      setMods([]);
+    }
+  })();
+
+  return () => ac.abort();
+}, [brandId]);
 
   /* ------------------ Load Brands + Branches ------------------ */
   useEffect(() => {
@@ -247,9 +273,11 @@ export default function CallCenter() {
 
         setBrands((bData || []).filter((b) => (b.isActive ?? true)));
         setBranches((brData || []).filter((b) => (b.isActive ?? true)));
-      } catch (e) {
+      } catch (e: any) {
+        const msg = String(e?.message || "");
+        if (msg.includes("AbortError") || msg.includes("signal is aborted")) return;
+        if (msg.startsWith("404")) return;
         console.error("Brands/Branches load failed:", e);
-        // keep what we might already have from /devices/online fallback
       }
     })();
     return () => ac.abort();
@@ -376,7 +404,7 @@ export default function CallCenter() {
         params.set("dateTo", date);
       }
 
-      const data = await fetchJson<any>(`/api/orders?${params.toString()}`);
+      const data = await fetchJson<any>(`${API_BASE}/orders?${params.toString()}`);
 
       const rows = Array.isArray(data)
         ? data

@@ -76,6 +76,13 @@ const NAV: NavItem[] = [
       "reports.costAnalysis.view",
       "reports.inventoryControl.view",
     ],
+    children: [
+      { href: "/Reports/salesreport", label: "Sales Report", perm: "sales report" },
+      { href: "/inventory report", label: "inventory report", perm: "inventory report" },
+      { href: "/analysis reports", label: "analysis reports", perm: "analysis reports" },
+      { href: "/system summery", label: "system summery", perm: "system summery" },
+      { href: "/inventory report", label: "inventory report", perm: "inventory report" },
+    ],
   },
   { href: "/callcenter", label: "Call Center", anyPerms: ["dashboard.callcenter"] },
   {
