@@ -48,6 +48,7 @@ import customersRouter from "./routes/customers";
 import promotionsRouter from './routes/promotions';
 import productSizesRouter from './routes/product-sizes';
 import reportsRouter from "./routes/reports";
+import tillRoutes from "./routes/pos-till";
 
 
 
@@ -175,6 +176,7 @@ console.log(
   app.use('/product-sizes', productSizesRouter);
   app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
   app.use("/reports", reportsRouter);
+  app.use("/pos", tillRoutes);
 
   
   
