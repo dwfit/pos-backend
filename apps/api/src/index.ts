@@ -49,7 +49,7 @@ import promotionsRouter from './routes/promotions';
 import productSizesRouter from './routes/product-sizes';
 import reportsRouter from "./routes/reports";
 import tillRoutes from "./routes/pos-till";
-
+import adminDevicesRouter from "./routes/adminDevices";
 
 
 
@@ -177,7 +177,7 @@ console.log(
   app.use("/uploads", express.static(path.join(process.cwd(), "uploads")));
   app.use("/reports", reportsRouter);
   app.use("/pos", tillRoutes);
-
+  app.use("/admin/devices", adminDevicesRouter);
   
   
   const port = Number(process.env.PORT || config.port || 4000);

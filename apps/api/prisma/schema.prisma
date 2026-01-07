@@ -92,6 +92,16 @@ enum TillStatus {
   CLOSED
 }
 
+enum DeviceKind {
+  PRINTER
+  KDS
+  DISPLAY
+  NOTIFIER
+  PAYMENT_TERMINAL
+  SUB_CASHIER
+  WAITER
+}
+
 /**
  * ----------------------------- ROLES -----------------------------
  */
@@ -417,7 +427,7 @@ model ProductSize {
 }
 
 /**
- * --------------------- DEVICE & CUSTOMER ---------------------
+ * ---------------------ADD POS DEVICE (Printer,sub cashier)  ---------------------
  */
 
 model Device {
@@ -437,6 +447,10 @@ model Device {
   @@index([brandId])
   @@index([branchId], map: "idx_device_branchId")
 }
+
+/**
+ * --------------------- CUSTOMER ---------------------
+ */
 
 model Customer {
   id          String    @id @default(cuid())
@@ -771,6 +785,14 @@ model PosDevice {
   branchId String?
   branch   Branch? @relation(fields: [branchId], references: [id], onDelete: SetNull, onUpdate: Cascade)
 
+  // 🌐 NEW: network info (for printers / KDS / displays, etc.)
+  ipAddress String?   // e.g. "192.168.1.50"
+
+  // 🖨 NEW: printer-specific config (only used when type is PRINTER)
+  printerModel             String? // "TM_T20II", "TM_m30II", ...
+  printerCategory          String? // "Cashier", "Kitchen", "Order info", ...
+  printerEnabledOrderTypes Json?   // ["DINE_IN","PICK_UP","DELIVERY",...]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -792,6 +814,7 @@ model PosDevice {
   @@unique([brandId, deviceCode], map: "uq_posdevice_brand_deviceCode")
   @@index([branchId], map: "idx_posdevice_branchId")
 }
+
 
 model DeviceSetting {
   deviceId  String    @id
