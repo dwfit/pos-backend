@@ -6,6 +6,7 @@ import { randomUUID } from "crypto";
 import { prisma } from "../db";
 import { compare } from "../utils/crypto";
 import { config } from "../config";
+import { requireAuth } from "../middleware/auth";
 
 const router = Router();
 
@@ -343,6 +344,55 @@ router.post("/logout", async (req, res) => {
   clearAuthCookies(req, res);
 
   res.status(204).end();
+});
+router.post("/sync-users", requireAuth, async (req: any, res) => {
+  try {
+    const { branchId } = req.body as { branchId?: string };
+    if (!branchId) return res.status(400).json({ message: "branchId is required" });
+
+    const users = await prisma.user.findMany({
+      where: {
+        // user belongs to this branch via relation table
+        userBranches: {
+          some: { branchId },
+        },
+      },
+      select: {
+        id: true,
+        name: true,
+        email: true,
+        loginPinHash: true, // your schema field
+        role: {
+          select: {
+            id: true,
+            name: true,
+            permissions: true, // if Role has permissions array
+          },
+        },
+      },
+      orderBy: { name: "asc" },
+    });
+
+    // Mobile should NOT get pin hash for offline login.
+    // It should get users WITHOUT pin, then verify PIN online, OR store a separate offline PIN hash locally.
+    // But if your design is to allow offline PIN, you can send loginPinHash and compare locally (bcrypt).
+    // That’s workable if you accept the risk.
+
+    const payload = users.map((u) => ({
+      id: u.id,
+      name: u.name,
+      email: u.email,
+      loginPinHash: u.loginPinHash, // optional: only if you support offline PIN compare
+      roleId: u.role?.id ?? null,
+      roleName: u.role?.name ?? null,
+      permissions: Array.isArray((u as any).role?.permissions) ? (u as any).role.permissions : [],
+    }));
+
+    return res.json({ users: payload });
+  } catch (err) {
+    console.error("❌ auth/sync-users error", err);
+    return res.status(500).json({ message: "Internal server error" });
+  }
 });
 
 export default router;

@@ -15,29 +15,29 @@ export default function ActivationScreen({ navigation }: Props) {
   };
 
   return (
-    <View style={styles.root}>
-      <Text style={styles.title}>Device Activation</Text>
+  <View style={styles.root}>
+    <Text style={styles.title}>Device Activation</Text>
 
-      <Text style={styles.label}>Branch ID</Text>
-      <TextInput
-        value={branchId}
-        onChangeText={setBranchId}
-        placeholder="B01"
-        style={styles.input}
-      />
+    <Text style={styles.label}>Branch ID</Text>
+    <TextInput
+      value={branchId}
+      onChangeText={setBranchId}
+      placeholder="B01"
+      style={styles.input}
+    />
 
-      <Text style={styles.label}>Activation Code</Text>
-      <TextInput
-        value={code}
-        onChangeText={setCode}
-        placeholder="6-digit code"
-        style={styles.input}
-      />
+    <Text style={styles.label}>Activation Code</Text>
+    <TextInput
+      value={code}
+      onChangeText={setCode}
+      placeholder="6-digit code"
+      style={styles.input}
+    />
 
-      <View style={styles.buttonWrapper}>
-        <Button title="Activate" onPress={activate} />
-      </View>
+    <View style={styles.buttonWrapper}>
+      <Button title="Activate" onPress={activate} />
     </View>
+  </View>
   );
 }
 
