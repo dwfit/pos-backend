@@ -8,6 +8,7 @@ import { compare } from "../utils/crypto";
 import { config } from "../config";
 import { requireAuth } from "../middleware/auth";
 
+
 const router = Router();
 
 /* -------------------------------------------------------------------------- */
@@ -394,5 +395,63 @@ router.post("/sync-users", requireAuth, async (req: any, res) => {
     return res.status(500).json({ message: "Internal server error" });
   }
 });
+
+router.get("/me", requireAuth, async (req: any, res) => {
+  try {
+    const userIdRaw = req.user?.sub ?? req.user?.id ?? req.userId;
+    const userId = typeof userIdRaw === "string" ? userIdRaw : null;
+
+    if (!userId) {
+      return res
+        .status(401)
+        .json({ code: "UNAUTHENTICATED", message: "Unauthorized" });
+    }
+
+    const user = await prisma.user.findUnique({
+      where: { id: userId },
+      select: {
+        id: true,
+        name: true,
+        roleId: true,
+        isActive: true,
+        role: {
+          select: { id: true, name: true, permissions: true },
+        },
+      },
+    });
+
+    if (!user || user.isActive === false) {
+      return res.status(401).json({
+        code: "USER_DISABLED",
+        message: "Your account is disabled",
+      });
+    }
+
+    if (!user.roleId || !user.role) {
+      return res.status(401).json({
+        code: "ROLE_REVOKED",
+        message: "Your role has been revoked",
+      });
+    }
+
+    const permissions = normalizePermissions(user.role.permissions);
+
+    return res.json({
+      id: user.id,
+      name: user.name,
+      roleId: user.roleId,
+      roleName: user.role.name,
+      permissions,
+    });
+  } catch (e: any) {
+    console.log("❌ /auth/me error", e);
+    return res.status(500).json({
+      message: "Server error",
+      detail: e?.message || String(e),
+      name: e?.name,
+    });
+  }
+});
+
 
 export default router;
