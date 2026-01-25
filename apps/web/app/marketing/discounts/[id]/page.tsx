@@ -498,7 +498,7 @@ export default function DiscountDetailPage({
     try {
       const body = {
         applyAllBranches,
-        branchIds: applyAllBranches ? [] : selectedBranchIds,
+        branchIds: applyAllBranches ? undefined : selectedBranchIds,
       };
 
       const updated = await fetchJson<Discount>(

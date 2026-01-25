@@ -306,6 +306,8 @@ model User {
   passwordHash          String
   language              String?
   loginPinHash          String?
+  loginPinSalt   String?
+  loginPinHashV2 String?
   displayLocalizedNames Boolean @default(false)
 
   roleId   String?

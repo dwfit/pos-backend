@@ -2,12 +2,11 @@
 import { Router } from "express";
 import { z } from "zod";
 import jwt from "jsonwebtoken";
-import { randomUUID } from "crypto";
+import { randomUUID, randomBytes, createHash } from "crypto";
 import { prisma } from "../db";
 import { compare } from "../utils/crypto";
 import { config } from "../config";
 import { requireAuth } from "../middleware/auth";
-
 
 const router = Router();
 
@@ -30,6 +29,11 @@ const PinLoginSchema = z.object({
 const RefreshSchema = z.object({
   refreshToken: z.string().min(10),
   deviceId: z.string().optional(),
+});
+
+const SyncUsersSchema = z.object({
+  branchId: z.string().min(1),
+  deviceId: z.string().min(1),
 });
 
 type AppRole = "ADMIN" | "MANAGER" | "AGENT";
@@ -116,6 +120,30 @@ function clearAuthCookies(req: any, res: any) {
 }
 
 /* -------------------------------------------------------------------------- */
+/* Offline PIN V2 (mobile-friendly)                                           */
+/* -------------------------------------------------------------------------- */
+/**
+ * IMPORTANT:
+ * - React Native cannot verify bcrypt offline
+ * - We keep bcrypt (loginPinHash) for ONLINE pin login
+ * - We add V2 sha256(pin:salt) for OFFLINE pin login sync
+ *
+ * Prisma User model must include:
+ *   loginPinSalt   String?
+ *   loginPinHashV2 String?
+ *
+ * When a user logs in online via PIN, we "lazy-upgrade" and set these if missing.
+ * /auth/sync-users returns pinSalt + pinHash (V2) for SQLite caching on device.
+ */
+function makePinSalt() {
+  return randomBytes(16).toString("hex");
+}
+
+function sha256Pin(pin: string, salt: string) {
+  return createHash("sha256").update(`${pin}:${salt}`).digest("hex");
+}
+
+/* -------------------------------------------------------------------------- */
 /* POST /auth/login                                                           */
 /* -------------------------------------------------------------------------- */
 
@@ -196,7 +224,7 @@ router.post("/login-pin", async (req, res) => {
     const users = await prisma.user.findMany({
       where: {
         isActive: true,
-        loginPinHash: { not: null },
+        loginPinHash: { not: null }, // bcrypt exists
         ...(branchId ? { userBranches: { some: { branchId } } } : {}),
       },
       include: {
@@ -214,6 +242,24 @@ router.post("/login-pin", async (req, res) => {
     }
 
     if (!user) return res.status(401).json({ error: "Invalid PIN" });
+
+    // ✅ Lazy upgrade: ensure mobile-friendly offline PIN fields exist
+    // Needs Prisma fields: loginPinSalt, loginPinHashV2
+    if (!user.loginPinSalt || !user.loginPinHashV2) {
+      const salt = makePinSalt();
+      const v2 = sha256Pin(pin, salt);
+
+      await prisma.user.update({
+        where: { id: user.id },
+        data: {
+          loginPinSalt: salt,
+          loginPinHashV2: v2,
+        },
+      });
+
+      user.loginPinSalt = salt;
+      user.loginPinHashV2 = v2;
+    }
 
     const dbRoleName = user.role?.name ?? "";
     const appRole = mapRoleNameToAppRole(dbRoleName);
@@ -267,7 +313,7 @@ router.post("/login-pin", async (req, res) => {
 });
 
 /* -------------------------------------------------------------------------- */
-/* POST /auth/refresh                                                          */
+/* POST /auth/refresh                                                         */
 /* -------------------------------------------------------------------------- */
 
 router.post("/refresh", async (req, res) => {
@@ -346,55 +392,88 @@ router.post("/logout", async (req, res) => {
 
   res.status(204).end();
 });
-router.post("/sync-users", requireAuth, async (req: any, res) => {
+
+/* -------------------------------------------------------------------------- */
+/* POST /auth/sync-users (Pre-login POS offline cache)                         */
+/* -------------------------------------------------------------------------- */
+
+router.post("/sync-users", async (req: any, res) => {
   try {
-    const { branchId } = req.body as { branchId?: string };
-    if (!branchId) return res.status(400).json({ message: "branchId is required" });
+    const { branchId, deviceId } = SyncUsersSchema.parse(req.body);
+
+    // ✅ Ensure device exists and belongs to this branch
+    const device = await prisma.posDevice.findUnique({
+      where: { id: deviceId },
+      select: { id: true, branchId: true, status: true },
+    });
+
+    if (!device) {
+      return res
+        .status(401)
+        .json({ code: "DEVICE_INVALID", message: "Device not found" });
+    }
+
+    // If you consider NOT_USED as inactive (adjust if your enum differs)
+    if (device.status === "NOT_USED") {
+      return res
+        .status(401)
+        .json({ code: "DEVICE_INACTIVE", message: "Device not active" });
+    }
+
+    if (device.branchId !== branchId) {
+      return res.status(401).json({
+        code: "DEVICE_BRANCH_MISMATCH",
+        message: "Device not in this branch",
+      });
+    }
 
     const users = await prisma.user.findMany({
       where: {
-        // user belongs to this branch via relation table
-        userBranches: {
-          some: { branchId },
-        },
+        userBranches: { some: { branchId } },
+        isActive: true,
       },
       select: {
         id: true,
         name: true,
         email: true,
-        loginPinHash: true, // your schema field
-        role: {
-          select: {
-            id: true,
-            name: true,
-            permissions: true, // if Role has permissions array
-          },
-        },
+
+        // ✅ Mobile-friendly offline PIN fields (V2)
+        loginPinSalt: true,
+        loginPinHashV2: true,
+
+        role: { select: { id: true, name: true, permissions: true } },
       },
       orderBy: { name: "asc" },
     });
-
-    // Mobile should NOT get pin hash for offline login.
-    // It should get users WITHOUT pin, then verify PIN online, OR store a separate offline PIN hash locally.
-    // But if your design is to allow offline PIN, you can send loginPinHash and compare locally (bcrypt).
-    // That’s workable if you accept the risk.
 
     const payload = users.map((u) => ({
       id: u.id,
       name: u.name,
       email: u.email,
-      loginPinHash: u.loginPinHash, // optional: only if you support offline PIN compare
+
+      // ✅ what the app expects
+      pinSalt: u.loginPinSalt ?? null,
+      pinHash: u.loginPinHashV2 ?? null,
+
       roleId: u.role?.id ?? null,
       roleName: u.role?.name ?? null,
-      permissions: Array.isArray((u as any).role?.permissions) ? (u as any).role.permissions : [],
+      permissions: normalizePermissions(u.role?.permissions),
     }));
 
     return res.json({ users: payload });
-  } catch (err) {
+  } catch (err: any) {
     console.error("❌ auth/sync-users error", err);
-    return res.status(500).json({ message: "Internal server error" });
+    return res.status(500).json({
+      message: "Internal server error",
+      detail: err?.message || String(err),
+      name: err?.name,
+    });
   }
 });
+
+/* -------------------------------------------------------------------------- */
+/* GET /auth/me                                                               */
+/* -------------------------------------------------------------------------- */
 
 router.get("/me", requireAuth, async (req: any, res) => {
   try {
@@ -452,6 +531,5 @@ router.get("/me", requireAuth, async (req: any, res) => {
     });
   }
 });
-
 
 export default router;

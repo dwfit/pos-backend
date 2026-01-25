@@ -99,8 +99,8 @@ function formatDiscountResponse(d: any) {
       : [],
     productIds: Array.isArray(d.productSizes)
       ? d.productSizes
-          .map((p: any) => p.productId)
-          .filter((pid: any) => !!pid)
+        .map((p: any) => p.productId)
+        .filter((pid: any) => !!pid)
       : [],
   };
 }
@@ -272,35 +272,35 @@ router.put('/:id/targets', requireAuth, async (req, res) => {
       }
 
       /* --------------------------- BRANCH LINKS -------------------------- */
-      if (parsed.branchIds || parsed.applyAllBranches !== undefined) {
-        // always clear existing links first
-        await tx.discountBranch.deleteMany({ where: { discountId: id } });
 
-        if (parsed.applyAllBranches) {
-          // GLOBAL – link to *all* existing branches
-          const allBranches = await tx.branch.findMany({
-            select: { id: true },
-          });
+      if (parsed.applyAllBranches !== undefined || parsed.branchIds !== undefined) {
 
-          if (allBranches.length) {
-            await tx.discountBranch.createMany({
-              data: allBranches.map(b => ({
-                discountId: id,
-                branchId: b.id,
-              })),
-              skipDuplicates: true,
-            });
-          }
-        } else if (parsed.branchIds && parsed.branchIds.length) {
-          // MANUAL – link only selected branches
+        // 1. Always clear old links
+        await tx.discountBranch.deleteMany({
+          where: { discountId: id },
+        });
+
+        // 2. GLOBAL discount
+        if (parsed.applyAllBranches === true) {
+          // Do NOTHING
+          // applyAllBranches=true means applies to ALL branches dynamically
+        }
+
+        // 3. SPECIFIC branches
+        else if (
+          Array.isArray(parsed.branchIds) &&
+          parsed.branchIds.length > 0
+        ) {
           await tx.discountBranch.createMany({
-            data: parsed.branchIds.map(branchId => ({
+            data: parsed.branchIds.map((branchId) => ({
               discountId: id,
               branchId,
             })),
             skipDuplicates: true,
           });
         }
+
+        // 4. applyAll=false + no branches = applies to NONE (valid)
       }
 
       /* ------------------------- CATEGORY LINKS -------------------------- */
