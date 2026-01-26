@@ -212,12 +212,8 @@ router.get("/tax-groups", async (_req, res) => {
       orderBy: { name: "asc" },
       select: { id: true, name: true },
     });
-
-    //  keep your frontend unchanged (string[])
     return res.json({ data: groups.map((g) => g.name) });
 
-    // If later you want better (id+name), use this instead:
-    // return res.json({ data: groups });
   } catch (err) {
     console.error("GET /branches/tax-groups error:", err);
     return res.status(500).json({ error: "Failed to load tax groups" });
