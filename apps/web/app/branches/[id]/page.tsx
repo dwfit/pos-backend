@@ -178,26 +178,49 @@ export default function EditBranchPage({ params }: { params: { id: string } }) {
   }, [base]);
 
   /* ----------------------------- Load Tax Groups (AUTH) ----------------------------- */
-  useEffect(() => {
-    let abort = false;
-    (async () => {
-      try {
-        setTaxGroupsLoading(true);
-        const j = await fetchJson<{ data: string[] }>(`${base}/branches/tax-groups`);
-        if (!abort) setTaxGroups(Array.isArray(j?.data) ? j.data : []);
-      } catch (e) {
-        console.warn("Failed to load tax groups", e);
-        if (!abort) setTaxGroups([]);
-      } finally {
-        if (!abort) setTaxGroupsLoading(false);
-      }
-    })();
+useEffect(() => {
+  let abort = false;
 
-    return () => {
-      abort = true;
-    };
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [base]);
+  (async () => {
+    try {
+      setTaxGroupsLoading(true);
+
+      // reset
+      setTaxGroups([]);
+
+      // ✅ fetch
+      const raw = await fetchJson<any>(`${base}/branches/tax-groups`);
+
+      // ✅ support multiple response shapes
+      const list: string[] =
+        Array.isArray(raw) ? raw :
+        Array.isArray(raw?.data) ? raw.data :
+        Array.isArray(raw?.taxGroups) ? raw.taxGroups :
+        Array.isArray(raw?.items) ? raw.items :
+        [];
+
+      if (!abort) {
+        setTaxGroups(list.filter(Boolean));
+      }
+    } catch (e: any) {
+      console.warn("Failed to load tax groups", e);
+
+      // ✅ IMPORTANT: show the reason (401, 403, wrong route, etc.)
+      if (!abort) {
+        setTaxGroups([]);
+        setError(`Tax groups load failed: ${e?.message || "Unknown error"}`);
+      }
+    } finally {
+      if (!abort) setTaxGroupsLoading(false);
+    }
+  })();
+
+  return () => {
+    abort = true;
+  };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+}, [base]);
+
 
   /* ----------------------------- Load existing branch (AUTH) ----------------------------- */
   useEffect(() => {

@@ -21,7 +21,7 @@ async function getBrandOrThrow(brandId: string) {
     select: {
       id: true,
       name: true,
-      code: true, // ✅ USE EXISTING FIELD
+      code: true, 
     },
   });
 
@@ -204,25 +204,26 @@ router.get("/", async (req, res) => {
   });
 });
 
-/* ---------- meta: distinct tax groups (place BEFORE :idOrCode) ---------- */
+/* ---------- meta: tax groups (from TaxGroup table) ---------- */
 router.get("/tax-groups", async (_req, res) => {
   try {
-    const taxGroups = await prisma.branch.findMany({
-      where: { taxGroup: { not: null } },
-      select: { taxGroup: true },
-      distinct: ["taxGroup"],
-      orderBy: { taxGroup: "asc" },
+    const groups = await prisma.taxGroup.findMany({
+      where: { isActive: true },
+      orderBy: { name: "asc" },
+      select: { id: true, name: true },
     });
-    res.json({
-      data: taxGroups
-        .map((t) => t.taxGroup)
-        .filter((t): t is string => !!t && t.trim() !== ""),
-    });
+
+    //  keep your frontend unchanged (string[])
+    return res.json({ data: groups.map((g) => g.name) });
+
+    // If later you want better (id+name), use this instead:
+    // return res.json({ data: groups });
   } catch (err) {
     console.error("GET /branches/tax-groups error:", err);
-    res.status(500).json({ error: "Failed to load tax groups" });
+    return res.status(500).json({ error: "Failed to load tax groups" });
   }
 });
+
 
 /* ---------- meta: next reference by brand (for Generate button) ---------- */
 router.get("/next-reference", async (req, res) => {
