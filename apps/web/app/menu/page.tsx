@@ -13,13 +13,14 @@ type Brand = { id: string; name: string; code?: string | null; isActive?: boolea
 type Category = {
   id: string;
   name: string;
+  nameLocalized?: string | null;
   imageUrl?: string | null;
   sort?: number;
   isActive?: boolean;
   brandId?: string;
 };
 
-type Size = { id?: string; name: string; price: number; code?: string | null };
+type Size = { id?: string; name: string; nameLocalized?: string | null; price: number; code?: string | null };
 
 type Tax = { id: number; name: string; rate: number; isActive?: boolean };
 
@@ -27,6 +28,7 @@ type Product = {
   id: string;
   sku: string;
   name: string;
+  nameLocalized?: string | null;
   categoryId: string;
   brandId?: string;
   imageUrl?: string | null;
@@ -41,6 +43,7 @@ type Product = {
 type ModifierItem = {
   id: string;
   name: string;
+  nameLocalized?: string | null;
   price: number;
   isActive?: boolean;
   taxId?: number | null;
@@ -50,6 +53,7 @@ type ModifierItem = {
 type ModifierGroup = {
   id: string;
   name: string;
+  nameLocalized?: string | null;
   min: number;
   max: number;
   isActive?: boolean;
@@ -63,6 +67,7 @@ type SizeOption = { label: string; code: string };
 type PriceTier = {
   id: string;
   name: string;
+  nameLocalized?: string | null;
   code: string;              
   type?: string | null;      
   isActive?: boolean;
@@ -526,10 +531,22 @@ export default function MenuPage() {
 
   function CategoriesTab() {
     const [name, setName] = useState("");
+    const [nameLocalized, setNameLocalized] = useState("");
     const [saving, setSaving] = useState(false);
     const [error, setError] = useState<string | null>(null);
     const [file, setFile] = useState<File | null>(null);
     const [preview, setPreview] = useState<string | null>(null);
+    const [createOpen, setCreateOpen] = useState(false);
+
+    function closeCreateModal() {
+      if (saving) return;
+      setCreateOpen(false);
+      setError(null);
+      setName("");
+      setNameLocalized("");
+      setFile(null);
+      setPreview(null);
+    }
 
     async function addCategory(e: React.FormEvent) {
       e.preventDefault();
@@ -548,14 +565,17 @@ export default function MenuPage() {
       try {
         const fd = new FormData();
         fd.set("name", name.trim());
+        fd.set("nameLocalized", nameLocalized.trim());
         fd.set("brandId", brandId);
         if (file) fd.set("image", file);
 
         await postForm("/menu/categories", fd);
 
         setName("");
+        setNameLocalized("");
         setFile(null);
         setPreview(null);
+        setCreateOpen(false);
 
         toast.push({ kind: "success", text: "Category created" });
         startTransition(() => refresh(brandId));
@@ -569,11 +589,7 @@ export default function MenuPage() {
 
     return (
       <div className="space-y-5">
-        <SectionCard
-          title="Create Category"
-          subtitle="Add a new category to group products in your POS."
-          right={saving ? <span className="text-xs text-slate-500">Saving…</span> : null}
-        >
+        <Modal open={createOpen} onClose={closeCreateModal} title="Add Category">
           <form
             onSubmit={addCategory}
             className="grid gap-4 md:grid-cols-[minmax(0,2fr)_minmax(0,1fr)]"
@@ -592,6 +608,7 @@ export default function MenuPage() {
                 value={name}
                 onChange={(e) => setName(e.target.value)}
               />
+              <input className="input w-full" placeholder="Localized category name" value={nameLocalized} onChange={(e) => setNameLocalized(e.target.value)} dir="auto" />
 
               <div className="flex flex-wrap items-center gap-3">
                 <input
@@ -618,7 +635,8 @@ export default function MenuPage() {
               </p>
             </div>
 
-            <div className="flex items-end justify-end">
+            <div className="flex items-end justify-end gap-2">
+              <button className="btn-ghost" type="button" onClick={closeCreateModal} disabled={saving}>Cancel</button>
               <button className="btn-primary" type="submit" disabled={saving || !brandId}>
                 {saving ? "Adding…" : "Add Category"}
               </button>
@@ -626,9 +644,13 @@ export default function MenuPage() {
           </form>
 
           {error && <div className="mt-3 text-sm text-rose-600">{error}</div>}
-        </SectionCard>
+        </Modal>
 
-        <SectionCard title="Categories" subtitle="Manage ordering, images, and visibility.">
+        <SectionCard
+          title="Categories"
+          subtitle="Manage ordering, images, and visibility."
+          right={<button className="btn-primary" type="button" onClick={() => setCreateOpen(true)}>Add Category</button>}
+        >
           {loading ? (
             <div className="grid grid-cols-2 gap-2 sm:grid-cols-3 md:grid-cols-4">
               {Array.from({ length: 6 }).map((_, i) => (
@@ -658,6 +680,7 @@ export default function MenuPage() {
                     )}
                     <div className="flex flex-col">
                       <span className="font-medium text-slate-800">{c.name}</span>
+                      {c.nameLocalized && <span className="text-[11px] text-slate-500" dir="auto">{c.nameLocalized}</span>}
                       <span className="text-[11px] text-slate-500">Sort: {c.sort ?? 0}</span>
                     </div>
                   </div>
@@ -668,14 +691,13 @@ export default function MenuPage() {
               ))}
             </div>
           ) : (
-            <EmptyState title="No categories" hint="Create your first category above." />
+            <EmptyState title="No categories" hint="Click Add Category to create your first category." />
           )}
         </SectionCard>
 
         <EditCategoryModal
           open={!!editingCategory}
           initial={editingCategory}
-          brandId={brandId} 
           onClose={() => setEditingCategory(null)}
           onSaved={() => {
             setEditingCategory(null);
@@ -691,6 +713,7 @@ export default function MenuPage() {
   function ProductsTab() {
     const [sku, setSku] = useState("");
     const [name, setName] = useState("");
+    const [nameLocalized, setNameLocalized] = useState("");
     const [categoryId, setCategoryId] = useState<string>("");
     const [taxId, setTaxId] = useState<number | null>(null);
     const [sizes, setSizes] = useState<Size[]>([{ name: "Regular", price: 0, code: "R" }]);
@@ -698,6 +721,7 @@ export default function MenuPage() {
     const [error, setError] = useState<string | null>(null);
     const [file, setFile] = useState<File | null>(null);
     const [preview, setPreview] = useState<string | null>(null);
+    const [createProductOpen, setCreateProductOpen] = useState(false);
 
     function updateSizeName(i: number, name: string) {
       const opt = sizeOptions.find((o) => o.label === name);
@@ -713,6 +737,9 @@ export default function MenuPage() {
         next[i] = { ...next[i], price: Number.isFinite(price) ? price : 0 };
         return next;
       });
+    }
+    function updateSizeLocalizedName(i: number, nameLocalized: string) {
+      setSizes((prev) => prev.map((s, idx) => idx === i ? { ...s, nameLocalized } : s));
     }
     function addSize() {
       const pick = nextUnusedPreset(sizes, sizeOptions);
@@ -741,6 +768,7 @@ export default function MenuPage() {
         fd.set("brandId", brandId);
         if (sku.trim()) fd.set("sku", sku.trim());
         fd.set("name", name.trim());
+        fd.set("nameLocalized", nameLocalized.trim());
         fd.set("categoryId", categoryId);
         if (taxId != null) fd.set("taxId", String(taxId));
 
@@ -749,6 +777,7 @@ export default function MenuPage() {
           JSON.stringify(
             sizes.map((s) => ({
               name: s.name,
+              nameLocalized: s.nameLocalized || null,
               price: s.price,
               code: s.code ?? null,
             }))
@@ -760,11 +789,13 @@ export default function MenuPage() {
 
         setSku("");
         setName("");
+        setNameLocalized("");
         setCategoryId("");
         setTaxId(null);
         setSizes([{ name: "Regular", price: 0, code: "R" }]);
         setFile(null);
         setPreview(null);
+        setCreateProductOpen(false);
 
         toast.push({ kind: "success", text: "Product created" });
         startTransition(() => refresh(brandId));
@@ -802,12 +833,11 @@ export default function MenuPage() {
 
     return (
       <div className="space-y-6">
+        <div className="flex justify-end">
+          <button className="btn-primary" type="button" onClick={() => setCreateProductOpen(true)}>Add Product</button>
+        </div>
         {/* Create Product */}
-        <SectionCard
-          title="Create Product"
-          subtitle="Define core details, VAT, sizes and image."
-          right={saving ? <span className="text-xs text-slate-500">Saving…</span> : null}
-        >
+        <Modal open={createProductOpen} onClose={() => !saving && setCreateProductOpen(false)} title="Add Product">
           <form onSubmit={addProduct} className="grid gap-4 md:grid-cols-4 md:items-start">
             <div className="md:col-span-4 flex flex-wrap items-center gap-2">
               <Pill>Brand</Pill>
@@ -826,6 +856,7 @@ export default function MenuPage() {
               value={name}
               onChange={(e) => setName(e.target.value)}
             />
+            <input className="input md:col-span-2" placeholder="Localized product name" value={nameLocalized} onChange={(e) => setNameLocalized(e.target.value)} dir="auto" />
             <select
               className="select md:col-span-1"
               value={categoryId}
@@ -889,7 +920,7 @@ export default function MenuPage() {
                 return (
                   <div
                     key={i}
-                    className="grid gap-2 rounded-xl bg-slate-50 p-3 md:grid-cols-[260px_160px_auto]"
+                    className="grid gap-2 rounded-xl bg-slate-50 p-3 md:grid-cols-[220px_220px_140px_auto]"
                   >
                     <select className="select" value={s.name} onChange={(e) => updateSizeName(i, e.target.value)}>
                       {hasCustom && <option value={s.name}>{s.name} (custom)</option>}
@@ -899,6 +930,7 @@ export default function MenuPage() {
                         </option>
                       ))}
                     </select>
+                    <input className="input" placeholder="Localized size name" value={s.nameLocalized || ""} onChange={(e) => updateSizeLocalizedName(i, e.target.value)} dir="auto" />
                     <input
                       className="input"
                       type="number"
@@ -923,7 +955,8 @@ export default function MenuPage() {
               <p className="text-[11px] text-slate-500">Size code is set automatically (e.g., Regular → R).</p>
             </div>
 
-            <div className="md:col-span-4 flex justify-end">
+            <div className="md:col-span-4 flex justify-end gap-2">
+              <button className="btn-ghost" type="button" onClick={() => setCreateProductOpen(false)} disabled={saving}>Cancel</button>
               <button className="btn-primary" type="submit" disabled={saving || !brandId}>
                 {saving ? "Creating…" : "Create Product"}
               </button>
@@ -931,7 +964,7 @@ export default function MenuPage() {
           </form>
 
           {error && <div className="mt-3 text-sm text-rose-600">{error}</div>}
-        </SectionCard>
+        </Modal>
 
         {/* Products list */}
         {loading ? (
@@ -995,6 +1028,7 @@ export default function MenuPage() {
 
                               <td className="px-3 py-2 font-medium text-slate-800">
                                 <div>{p.name}</div>
+                                {p.nameLocalized && <div className="text-xs font-normal text-slate-500" dir="auto">{p.nameLocalized}</div>}
                                 <TaxBadge product={p} taxes={taxes} />
                               </td>
 
@@ -1123,7 +1157,6 @@ export default function MenuPage() {
           categories={categories}
           sizeOptions={sizeOptions}
           taxes={taxes}
-          brandId={brandId} 
           onClose={() => setEditingProduct(null)}
           onSaved={() => {
             setEditingProduct(null);
@@ -1151,6 +1184,7 @@ export default function MenuPage() {
 
     const [nLabel, setNLabel] = useState("");
     const [nCode, setNCode] = useState("");
+    const [addSizeOpen, setAddSizeOpen] = useState(false);
 
     useEffect(() => {
       (async () => {
@@ -1174,6 +1208,7 @@ export default function MenuPage() {
         await postJson("/menu/size-options", { label, code });
         setNLabel("");
         setNCode("");
+        setAddSizeOpen(false);
         toast.push({ kind: "success", text: "Size added" });
         await refreshSizes();
         setList(await getJson<SizeOption[]>("/menu/size-options", []));
@@ -1220,7 +1255,7 @@ export default function MenuPage() {
 
     return (
       <div className="space-y-6">
-        <SectionCard title="Add Size" subtitle="Preset sizes speed up product creation across branches.">
+        <Modal open={addSizeOpen} onClose={() => setAddSizeOpen(false)} title="Add Size">
           <form
             onSubmit={add}
             className="grid grid-cols-1 gap-2 sm:grid-cols-[minmax(0,2fr)_160px_auto]"
@@ -1244,9 +1279,13 @@ export default function MenuPage() {
           <p className="mt-2 text-[11px] text-slate-500">
             Label is shown to users. Code is stored with products (e.g., S/R/L).
           </p>
-        </SectionCard>
+        </Modal>
 
-        <SectionCard title="All Sizes" subtitle="Inline edit labels and codes. Changes apply to future products.">
+        <SectionCard
+          title="All Sizes"
+          subtitle="Inline edit labels and codes. Changes apply to future products."
+          right={<button className="btn-primary" type="button" onClick={() => setAddSizeOpen(true)}>Add Size</button>}
+        >
           {loadingSO ? (
             <div className="space-y-2">
               {Array.from({ length: 4 }).map((_, i) => (
@@ -1293,7 +1332,7 @@ export default function MenuPage() {
               </table>
             </div>
           ) : (
-            <EmptyState title="No sizes yet" hint="Add your first size above." />
+            <EmptyState title="No sizes yet" hint="Click Add Size to create your first size." />
           )}
         </SectionCard>
       </div>
@@ -1304,15 +1343,19 @@ export default function MenuPage() {
 
   function ModifiersTab() {
     const [name, setName] = useState("");
+    const [nameLocalized, setNameLocalized] = useState("");
     const [min, setMin] = useState(0);
     const [max, setMax] = useState(1);
     const [savingGroup, setSavingGroup] = useState(false);
 
     const [selectedGroup, setSelectedGroup] = useState<string>("");
     const [itemName, setItemName] = useState("");
+    const [itemNameLocalized, setItemNameLocalized] = useState("");
     const [itemPrice, setItemPrice] = useState<number>(0);
     const [itemTaxId, setItemTaxId] = useState<number | null>(null);
     const [savingItem, setSavingItem] = useState(false);
+    const [addGroupOpen, setAddGroupOpen] = useState(false);
+    const [addItemOpen, setAddItemOpen] = useState(false);
 
     async function addGroup(e: React.FormEvent) {
       e.preventDefault();
@@ -1324,11 +1367,13 @@ export default function MenuPage() {
 
       setSavingGroup(true);
       try {
-        await postJson("/menu/modifiers", { brandId, name, min: Number(min), max: Number(max) });
+        await postJson("/menu/modifiers", { brandId, name, nameLocalized, min: Number(min), max: Number(max) });
 
         setName("");
+        setNameLocalized("");
         setMin(0);
         setMax(1);
+        setAddGroupOpen(false);
         toast.push({ kind: "success", text: "Group created" });
         startTransition(() => refresh(brandId));
       } catch (e: any) {
@@ -1352,13 +1397,16 @@ export default function MenuPage() {
         await postJson(`/menu/modifiers/${selectedGroup}/items`, {
           brandId,
           name: itemName,
+          nameLocalized: itemNameLocalized,
           price: Number(itemPrice),
           taxId: itemTaxId,
         });
 
         setItemName("");
+        setItemNameLocalized("");
         setItemPrice(0);
         setItemTaxId(null);
+        setAddItemOpen(false);
         toast.push({ kind: "success", text: "Item added" });
         startTransition(() => refresh(brandId));
       } catch (e: any) {
@@ -1392,11 +1440,7 @@ export default function MenuPage() {
 
     return (
       <div className="space-y-6">
-        <SectionCard
-          title="Create Modifier Group"
-          subtitle="Build groups like “Add Ons” or “Sauce choice”."
-          right={savingGroup ? <span className="text-xs text-slate-500">Saving…</span> : null}
-        >
+        <Modal open={addGroupOpen} onClose={() => !savingGroup && setAddGroupOpen(false)} title="Add Modifier Group">
           <form onSubmit={addGroup} className="space-y-3">
             <div className="flex flex-wrap items-center gap-2">
               <Pill>Brand</Pill>
@@ -1410,6 +1454,7 @@ export default function MenuPage() {
                 value={name}
                 onChange={(e) => setName(e.target.value)}
               />
+              <input className="input w-64" placeholder="Localized group name" value={nameLocalized} onChange={(e) => setNameLocalized(e.target.value)} dir="auto" />
               <input type="number" className="input w-24" placeholder="Min" value={min} onChange={(e) => setMin(Number(e.target.value))} />
               <input type="number" className="input w-24" placeholder="Max" value={max} onChange={(e) => setMax(Number(e.target.value))} />
               <button className="btn-primary" type="submit" disabled={savingGroup || !brandId}>
@@ -1417,14 +1462,10 @@ export default function MenuPage() {
               </button>
             </div>
           </form>
-        </SectionCard>
+        </Modal>
 
-        <SectionCard
-          title="Add Item to Group"
-          subtitle="Attach individual modifier choices with pricing and VAT."
-          right={savingItem ? <span className="text-xs text-slate-500">Saving…</span> : null}
-        >
-          <form onSubmit={addItem} className="grid gap-2 md:grid-cols-[1.4fr_1.4fr_140px_160px_auto]">
+        <Modal open={addItemOpen} onClose={() => !savingItem && setAddItemOpen(false)} title="Add Modifier Item">
+          <form onSubmit={addItem} className="grid gap-2 md:grid-cols-[1.3fr_1.3fr_1.3fr_120px_150px_auto]">
             <select className="select" value={selectedGroup} onChange={(e) => setSelectedGroup(e.target.value)}>
               <option value="">Select group</option>
               {groups.map((g) => (
@@ -1434,6 +1475,7 @@ export default function MenuPage() {
               ))}
             </select>
             <input className="input" placeholder="Item name" value={itemName} onChange={(e) => setItemName(e.target.value)} />
+            <input className="input" placeholder="Localized item name" value={itemNameLocalized} onChange={(e) => setItemNameLocalized(e.target.value)} dir="auto" />
             <input className="input" type="number" min="0" step="0.01" placeholder="Price" value={Number.isFinite(itemPrice) ? itemPrice : 0} onChange={(e) => setItemPrice(Number(e.target.value || 0))} />
             <select className="select" value={itemTaxId ?? ""} onChange={(e) => setItemTaxId(e.target.value ? Number(e.target.value) : null)}>
               <option value="">No tax</option>
@@ -1450,17 +1492,30 @@ export default function MenuPage() {
           <p className="mt-2 text-[11px] text-slate-500">
             Modifier item prices are VAT-inclusive; if no VAT is selected, the product’s VAT will be used during cart calculation.
           </p>
-        </SectionCard>
+        </Modal>
 
-        <SectionCard title="All Modifier Groups" subtitle="Tweak names, limits, VAT and active state inline.">
+        <SectionCard
+          title="All Modifier Groups"
+          subtitle="Tweak names, limits, VAT and active state inline."
+          right={
+            <div className="flex gap-2">
+              <button className="btn-ghost" type="button" onClick={() => setAddItemOpen(true)} disabled={!groups.length}>Add Item</button>
+              <button className="btn-primary" type="button" onClick={() => setAddGroupOpen(true)}>Add Group</button>
+            </div>
+          }
+        >
           {groups.length ? (
             <div className="grid gap-4 md:grid-cols-2">
               {groups.map((g) => (
                 <div key={g.id} className="space-y-3 rounded-2xl border border-slate-200 bg-slate-50 p-4 overflow-hidden">
-                  <div className="grid grid-cols-[minmax(0,1.7fr)_90px_90px] gap-2">
+                  <div className="grid grid-cols-[minmax(0,1.4fr)_minmax(0,1.4fr)_90px_90px] gap-2">
                     <div>
                       <div className="text-[11px] text-slate-500">Name</div>
                       <input className="input w-full" defaultValue={g.name} onBlur={(e) => e.target.value.trim() && saveGroup(g, { name: e.target.value.trim() })} />
+                    </div>
+                    <div>
+                      <div className="text-[11px] text-slate-500">Localized name</div>
+                      <input className="input w-full" defaultValue={g.nameLocalized || ""} onBlur={(e) => saveGroup(g, { nameLocalized: e.target.value.trim() || null })} dir="auto" />
                     </div>
                     <div>
                       <div className="text-[11px] text-slate-500">Min</div>
@@ -1486,7 +1541,8 @@ export default function MenuPage() {
                     {g.items?.length ? (
                       g.items.map((it) => (
                         <div key={it.id} className="grid grid-cols-12 items-center gap-2 rounded-lg border border-slate-200 bg-white p-2 text-xs shadow-sm">
-                          <input className="input col-span-4" defaultValue={it.name} onBlur={(e) => e.target.value.trim() && saveItem(g, it, { name: e.target.value.trim() })} />
+                          <input className="input col-span-3" defaultValue={it.name} onBlur={(e) => e.target.value.trim() && saveItem(g, it, { name: e.target.value.trim() })} />
+                          <input className="input col-span-3" defaultValue={it.nameLocalized || ""} placeholder="Localized name" onBlur={(e) => saveItem(g, it, { nameLocalized: e.target.value.trim() || null })} dir="auto" />
                           <input className="input col-span-3" type="number" min="0" step="0.01" defaultValue={it.price} onBlur={(e) => saveItem(g, it, { price: Number(e.target.value || 0) })} />
                           <select className="select col-span-3" defaultValue={it.taxId ?? ""} onChange={(e) => saveItem(g, it, { taxId: e.target.value ? Number(e.target.value) : null })}>
                             <option value="">No VAT</option>
@@ -1511,7 +1567,7 @@ export default function MenuPage() {
               ))}
             </div>
           ) : (
-            <EmptyState title="No modifier groups yet" hint="Create your first group above." />
+            <EmptyState title="No modifier groups yet" hint="Click Add Group to create your first modifier group." />
           )}
         </SectionCard>
       </div>
@@ -1588,9 +1644,11 @@ export default function MenuPage() {
     const toast = useToast();
   
     const [name, setName] = useState("");
+    const [nameLocalized, setNameLocalized] = useState("");
     const [reference, setReference] = useState("");
     const [kind, setKind] = useState("");
     const [saving, setSaving] = useState(false);
+    const [createTierOpen, setCreateTierOpen] = useState(false);
   
     async function createTier(e: React.FormEvent) {
       e.preventDefault();
@@ -1608,15 +1666,18 @@ export default function MenuPage() {
         await postJson("/pricing/tiers", {
           brandId,
           name: n,
+          nameLocalized: nameLocalized.trim() || null,
           code: r,               
-          kind: kind.trim() || null,
+          type: kind.trim() || null,
         });
         
   
         toast.push({ kind: "success", text: "Tier created" });
         setName("");
+        setNameLocalized("");
         setReference("");
         setKind("");
+        setCreateTierOpen(false);
   
         // refresh tier list (and keep your current state style)
         startTransition(() => refresh(brandId));
@@ -1651,18 +1712,15 @@ export default function MenuPage() {
   
     return (
       <div className="space-y-6">
-        <SectionCard
-          title="Create Price Tier"
-          subtitle="Create tiers like Delivery App, Happy Hour, Corporate, VIP…"
-          right={saving ? <span className="text-xs text-slate-500">Saving…</span> : null}
-        >
-          <form onSubmit={createTier} className="grid gap-3 md:grid-cols-[1.2fr_1fr_1fr_auto]">
+        <Modal open={createTierOpen} onClose={() => !saving && setCreateTierOpen(false)} title="Add Price Tier">
+          <form onSubmit={createTier} className="grid gap-3 md:grid-cols-[1.2fr_1.2fr_1fr_1fr_auto]">
             <input
               className="input"
               placeholder='Name (e.g., "Orange")'
               value={name}
               onChange={(e) => setName(e.target.value)}
             />
+            <input className="input" placeholder="Localized name" value={nameLocalized} onChange={(e) => setNameLocalized(e.target.value)} dir="auto" />
             <input
               className="input"
               placeholder='Reference (e.g., "ORANGE")'
@@ -1683,17 +1741,22 @@ export default function MenuPage() {
           <p className="mt-2 text-[11px] text-slate-500">
             After creating a tier, go to <b>Products → Tier Pricing</b> to set overrides per product.
           </p>
-        </SectionCard>
+        </Modal>
   
-        <SectionCard title="All Price Tiers" subtitle="Enable/disable tiers or remove unused ones.">
+        <SectionCard
+          title="All Price Tiers"
+          subtitle="Enable/disable tiers or remove unused ones."
+          right={<button className="btn-primary" type="button" onClick={() => setCreateTierOpen(true)}>Add Price Tier</button>}
+        >
           {!tiers.length ? (
-            <EmptyState title="No tiers yet" hint="Create your first tier above." />
+            <EmptyState title="No tiers yet" hint="Click Add Price Tier to create your first tier." />
           ) : (
             <div className="overflow-hidden rounded-xl border border-slate-200 bg-slate-50">
               <table className="w-full text-sm">
                 <thead className="bg-slate-100 text-left text-slate-600">
                   <tr>
                     <th className="px-3 py-2 font-medium">Name</th>
+                    <th className="px-3 py-2 font-medium">Localized name</th>
                     <th className="px-3 py-2 font-medium">Reference</th>
                     <th className="px-3 py-2 font-medium">Kind</th>
                     <th className="px-3 py-2 font-medium">Status</th>
@@ -1713,14 +1776,17 @@ export default function MenuPage() {
                           }}
                         />
                       </td>
+                      <td className="px-3 py-2">
+                        <input className="input w-full" defaultValue={t.nameLocalized || ""} onBlur={(e) => updateTier(t, { nameLocalized: e.target.value.trim() || null })} dir="auto" />
+                      </td>
   
                       <td className="px-3 py-2">
                         <input
                           className="input w-full"
-                          defaultValue={t.reference}
+                          defaultValue={t.code}
                           onBlur={(e) => {
                             const v = e.target.value.trim();
-                            if (v && v !== t.reference) updateTier(t, { reference: v });
+                            if (v && v !== t.code) updateTier(t, { code: v });
                           }}
                         />
                       </td>
@@ -1728,10 +1794,10 @@ export default function MenuPage() {
                       <td className="px-3 py-2">
                         <input
                           className="input w-full"
-                          defaultValue={t.kind || ""}
+                          defaultValue={t.type || ""}
                           onBlur={(e) => {
                             const v = e.target.value.trim();
-                            if ((v || null) !== (t.kind || null)) updateTier(t, { kind: v || undefined });
+                            if ((v || null) !== (t.type || null)) updateTier(t, { type: v || undefined });
                           }}
                         />
                       </td>
@@ -1823,7 +1889,7 @@ function TierPricingModal({
     setLoading(true);
     try {
       const data = await getJsonLocal<TierProductPricing>(`/pricing/tiers/${tid}/overrides?productId=${pid}`, {
-        tier: tiers.find((t) => t.id === tid) || { id: tid, name: "Tier", reference: "" },
+        tier: tiers.find((t) => t.id === tid) || { id: tid, name: "Tier", code: "" },
         sizes: [],
         modifierItems: [],
       });
@@ -1914,7 +1980,7 @@ function TierPricingModal({
               {tiers.length ? (
                 tiers.map((t) => (
                   <option key={t.id} value={t.id}>
-                    {t.name} ({t.reference})
+                    {t.name} ({t.code})
                   </option>
                 ))
               ) : (
@@ -2067,6 +2133,7 @@ function EditCategoryModal({
   onSaved: () => void;
 }) {
   const [name, setName] = useState(initial?.name || "");
+  const [nameLocalized, setNameLocalized] = useState(initial?.nameLocalized || "");
   const [sort, setSort] = useState<number>(initial?.sort ?? 0);
   const [isActive, setIsActive] = useState<boolean>(!!initial?.isActive);
   const [file, setFile] = useState<File | null>(null);
@@ -2076,6 +2143,7 @@ function EditCategoryModal({
 
   useEffect(() => {
     setName(initial?.name || "");
+    setNameLocalized(initial?.nameLocalized || "");
     setSort(initial?.sort ?? 0);
     setIsActive(!!initial?.isActive);
     setFile(null);
@@ -2091,6 +2159,7 @@ function EditCategoryModal({
     try {
       const fd = new FormData();
       if (name.trim()) fd.set("name", name.trim());
+      fd.set("nameLocalized", nameLocalized.trim());
       fd.set("sort", String(Number(sort) || 0));
       fd.set("isActive", String(!!isActive));
       if (file) fd.set("image", file);
@@ -2111,6 +2180,10 @@ function EditCategoryModal({
           <div className="col-span-2">
             <div className="text-[11px] text-slate-500">Name</div>
             <input className="input w-full" value={name} onChange={(e) => setName(e.target.value)} />
+          </div>
+          <div className="col-span-2">
+            <div className="text-[11px] text-slate-500">Localized name</div>
+            <input className="input w-full" value={nameLocalized} onChange={(e) => setNameLocalized(e.target.value)} dir="auto" />
           </div>
           <div>
             <div className="text-[11px] text-slate-500">Sort</div>
@@ -2193,11 +2266,12 @@ function EditProductModal({
 }) {
   const [sku, setSku] = useState(initial?.sku || "");
   const [name, setName] = useState(initial?.name || "");
+  const [nameLocalized, setNameLocalized] = useState(initial?.nameLocalized || "");
   const [categoryId, setCategoryId] = useState<string>(initial?.categoryId || "");
   const [taxId, setTaxId] = useState<number | null>(initial?.taxId ?? null);
   const [sizes, setSizes] = useState<Size[]>(
     initial?.sizes?.length
-      ? initial.sizes.map((s) => ({ name: s.name, price: Number(s.price) || 0, code: s.code ?? null }))
+      ? initial.sizes.map((s) => ({ id: s.id, name: s.name, nameLocalized: s.nameLocalized, price: Number(s.price) || 0, code: s.code ?? null }))
       : []
   );
   const [isActive, setIsActive] = useState<boolean>(!!initial?.isActive);
@@ -2209,11 +2283,12 @@ function EditProductModal({
   useEffect(() => {
     setSku(initial?.sku || "");
     setName(initial?.name || "");
+    setNameLocalized(initial?.nameLocalized || "");
     setCategoryId(initial?.categoryId || "");
     setTaxId(initial?.taxId ?? null);
     setSizes(
       initial?.sizes?.length
-        ? initial.sizes.map((s) => ({ name: s.name, price: Number(s.price) || 0, code: s.code ?? null }))
+        ? initial.sizes.map((s) => ({ id: s.id, name: s.name, nameLocalized: s.nameLocalized, price: Number(s.price) || 0, code: s.code ?? null }))
         : []
     );
     setIsActive(!!initial?.isActive);
@@ -2224,7 +2299,7 @@ function EditProductModal({
 
   if (!initial) return null;
 
-  function updateSize(i: number, key: "name" | "price", v: string) {
+  function updateSize(i: number, key: "name" | "nameLocalized" | "price", v: string) {
     if (key === "name") {
       const opt = sizeOptions.find((o) => o.label === v);
       setSizes((prev) => {
@@ -2232,13 +2307,13 @@ function EditProductModal({
         next[i] = { ...next[i], name: v, code: opt?.code ?? null };
         return next;
       });
-    } else {
+    } else if (key === "price") {
       setSizes((prev) => {
         const next = prev.slice();
         next[i] = { ...next[i], price: Number(v || 0) };
         return next;
       });
-    }
+    } else setSizes((prev) => prev.map((s, idx) => idx === i ? { ...s, nameLocalized: v } : s));
   }
   function addSize() {
     const pick = sizeOptions.length
@@ -2257,9 +2332,10 @@ function EditProductModal({
       const fd = new FormData();
       if (sku.trim()) fd.set("sku", sku.trim());
       if (name.trim()) fd.set("name", name.trim());
+      fd.set("nameLocalized", nameLocalized.trim());
       if (categoryId) fd.set("categoryId", categoryId);
       fd.set("isActive", String(!!isActive));
-      fd.set("sizes", JSON.stringify(sizes.map((s) => ({ name: s.name, price: s.price, code: s.code ?? null }))));
+      fd.set("sizes", JSON.stringify(sizes.map((s) => ({ id: s.id, name: s.name, nameLocalized: s.nameLocalized || null, price: s.price, code: s.code ?? null }))));
       if (file) fd.set("image", file);
       if (removeImage) fd.set("removeImage", "true");
       if (taxId != null) fd.set("taxId", String(taxId));
@@ -2284,6 +2360,10 @@ function EditProductModal({
           <div>
             <div className="text-[11px] text-slate-500">Name</div>
             <input className="input w-full" value={name} onChange={(e) => setName(e.target.value)} />
+          </div>
+          <div>
+            <div className="text-[11px] text-slate-500">Localized name</div>
+            <input className="input w-full" value={nameLocalized} onChange={(e) => setNameLocalized(e.target.value)} dir="auto" />
           </div>
           <div>
             <div className="text-[11px] text-slate-500">Category</div>
@@ -2357,7 +2437,7 @@ function EditProductModal({
               const hasCustom = s.name && !sizeOptions.some((o) => o.label === s.name);
               return (
                 <div key={i} className="grid grid-cols-12 gap-2">
-                  <select className="select col-span-5" value={s.name} onChange={(e) => updateSize(i, "name", e.target.value)}>
+                  <select className="select col-span-3" value={s.name} onChange={(e) => updateSize(i, "name", e.target.value)}>
                     {hasCustom && <option value={s.name}>{s.name} (custom)</option>}
                     {sizeOptions.map((o) => (
                       <option key={o.code} value={o.label}>
@@ -2366,7 +2446,8 @@ function EditProductModal({
                     ))}
                   </select>
 
-                  <input className="input col-span-4" type="number" min="0" step="0.01" placeholder="Price" value={Number.isFinite(s.price) ? s.price : 0} onChange={(e) => updateSize(i, "price", e.target.value)} />
+                  <input className="input col-span-3" placeholder="Localized size name" value={s.nameLocalized || ""} onChange={(e) => updateSize(i, "nameLocalized", e.target.value)} dir="auto" />
+                  <input className="input col-span-3" type="number" min="0" step="0.01" placeholder="Price" value={Number.isFinite(s.price) ? s.price : 0} onChange={(e) => updateSize(i, "price", e.target.value)} />
 
                   <div className="col-span-2 flex items-center text-xs text-slate-500">
                     {s.code ? <span className="tag bg-slate-100">code: {s.code}</span> : <span className="opacity-60">no code</span>}
