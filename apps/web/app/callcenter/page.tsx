@@ -2,7 +2,6 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { ShoppingCart, X, Send } from "lucide-react";
-import { authStore } from "@/lib/auth-store";
 
 const API_BASE = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:4000";
 
@@ -62,17 +61,12 @@ type Branch = {
 function getToken() {
   if (typeof window === "undefined") return "";
 
-  // 1) Primary: what authStore is currently holding
-  const storeToken = authStore.getState().token || authStore.getState().posToken || "";
-
-  // 2) Fallbacks: direct localStorage keys, in case something wrote them there
-  const lsToken =
+  return (
     localStorage.getItem("token") ||
     localStorage.getItem("pos_token") ||
-    localStorage.getItem("accessToken") || // extra safety
-    "";
-
-  return storeToken || lsToken;
+    localStorage.getItem("accessToken") ||
+    ""
+  );
 }
 
 async function fetchJson<T>(
@@ -83,8 +77,6 @@ async function fetchJson<T>(
   const token = getToken();
 
   // 🔍 temporary debug – REMOVE when it’s working
-  console.log("🔐 Callcenter fetch:", input, "token prefix:", token?.slice(0, 16));
-
   const res = await fetch(input, {
     ...init,
     headers: {
@@ -654,6 +646,8 @@ useEffect(() => {
   async function sendToDevice() {
     if (!deviceId) return alert("Select a device.");
     if (cart.length === 0) return alert("Add at least one item.");
+    if (!customerName.trim()) return alert("Customer name is required.");
+    if (!customerMobile.trim()) return alert("Customer mobile is required.");
 
     const picked = devices.find((d) => d.id === deviceId);
     if (!picked || picked.type?.toUpperCase?.() !== "CASHIER" || picked.receivesOnlineOrders === false) {
@@ -666,8 +660,8 @@ useEffect(() => {
         deviceId,
         branchId: picked.branch?.id,
         brandId,
-        customerName: customerName || undefined,
-        customerMobile: customerMobile || undefined,
+        customerName: customerName.trim(),
+        customerMobile: customerMobile.trim(),
         notes: notes || undefined,
         items: cart.map((i) => ({
           productId: i.productId,
@@ -901,16 +895,26 @@ useEffect(() => {
                 <div className="border rounded-2xl p-4 grid gap-3">
                   <h5 className="font-medium">Customer</h5>
                   <label className="grid gap-1 text-sm">
-                    <span className="text-slate-600">Name</span>
-                    <input value={customerName} onChange={(e) => setCustomerName(e.target.value)} className="border rounded-xl px-3 py-2 text-sm" />
+                    <span className="text-slate-600">
+                      Name <span className="text-rose-600">*</span>
+                    </span>
+                    <input
+                      value={customerName}
+                      onChange={(e) => setCustomerName(e.target.value)}
+                      className="border rounded-xl px-3 py-2 text-sm"
+                      required
+                    />
                   </label>
                   <label className="grid gap-1 text-sm">
-                    <span className="text-slate-600">Mobile</span>
+                    <span className="text-slate-600">
+                      Mobile <span className="text-rose-600">*</span>
+                    </span>
                     <input
                       value={customerMobile}
                       onChange={(e) => setCustomerMobile(e.target.value)}
                       className="border rounded-xl px-3 py-2 text-sm"
                       placeholder="05xxxxxxxx"
+                      required
                     />
                   </label>
                 </div>
