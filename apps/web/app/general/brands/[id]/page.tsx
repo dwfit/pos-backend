@@ -907,7 +907,7 @@ function InventorySettingsForm({ brandId }: { brandId: string }) {
     (async () => {
       try {
         setLoading(true);
-        const data = await fetchJson<BrandSettings>(`${API_BASE}/brand-settings/${brandId}`);
+        const data = await apiFetch<BrandSettings>(`/brand-settings/${brandId}`);
         if (!cancelled && data) setForm({ ...defaults, ...data });
       } catch (err: any) {
         if (!cancelled) setError(err.message || "Failed to load settings");
@@ -942,7 +942,7 @@ function InventorySettingsForm({ brandId }: { brandId: string }) {
     setMessage(null);
     setError(null);
     try {
-      await fetchJson(`${API_BASE}/brand-settings/${brandId}`, {
+      await apiFetch(`/brand-settings/${brandId}`, {
         method: "POST",
         body: JSON.stringify({
           inventoryLogoUrl: form.inventoryLogoUrl ?? "",
